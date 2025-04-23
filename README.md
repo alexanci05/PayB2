@@ -1,6 +1,6 @@
 # payb2
 
-A new Flutter project.
+Proyecto inicial PayB2, Alexander Caiza
 
 ## Getting Started
 
