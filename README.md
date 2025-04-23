@@ -1,4 +1,4 @@
-# payb2
+# PayB2
 
 Proyecto inicial PayB2, Alexander Caiza
 
