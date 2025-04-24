@@ -91,7 +91,7 @@ class _MainScreenState extends State<MainScreen> {
 
 // Placeholder screens:
 class GroupsScreen extends StatefulWidget {
-  const GroupsScreen({Key? key}) : super(key: key);
+  const GroupsScreen({super.key});
 
   @override
   State<GroupsScreen> createState() => _GroupsScreenState();
@@ -172,6 +172,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
 
 class WalletScreen extends StatelessWidget {
   const WalletScreen({super.key});
+  
 
   @override
   Widget build(BuildContext context) {
@@ -188,9 +189,11 @@ class WalletScreen extends StatelessWidget {
                 'groupCode': 'X1Y2Z3',
                 'createdAt': FieldValue.serverTimestamp(),
               });
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Grupo creado en Firebase')),
-              );
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Grupo creado en Firebase')),
+                );
+              }
             },
             child: const Text('🚀 Test Firebase'),
           ),

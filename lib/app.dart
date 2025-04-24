@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'screens/home/home_screen.dart';
 import 'screens/home/main_screen.dart';
 import 'screens/crear_grupo/crear_grupo_screen.dart';
 import 'screens/unirse_grupo/unirse_grupo_screen.dart'; // crea este archivo más adelante

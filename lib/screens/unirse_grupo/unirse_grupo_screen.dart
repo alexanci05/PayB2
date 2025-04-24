@@ -4,10 +4,10 @@ class UnirseGrupoScreen extends StatefulWidget {
   const UnirseGrupoScreen({super.key});
 
   @override
-  _UnirseGrupoScreenState createState() => _UnirseGrupoScreenState();
+  UnirseGrupoScreenState createState() => UnirseGrupoScreenState();
 }
 
-class _UnirseGrupoScreenState extends State<UnirseGrupoScreen> {
+class UnirseGrupoScreenState extends State<UnirseGrupoScreen> {
   final _formKey = GlobalKey<FormState>();
   final TextEditingController _codigoController = TextEditingController();
 
@@ -60,10 +60,10 @@ class _UnirseGrupoScreenState extends State<UnirseGrupoScreen> {
               const SizedBox(height: 20),
               ElevatedButton(
                 onPressed: _onSubmit,
-                child: const Text('Unirse'),
                 style: ElevatedButton.styleFrom(
                   minimumSize: const Size.fromHeight(48),
                 ),
+                child: const Text('Unirse')
               ),
             ],
           ),

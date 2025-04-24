@@ -8,10 +8,10 @@ class CrearGrupoScreen extends StatefulWidget {
   const CrearGrupoScreen({super.key});
 
   @override
-  _CrearGrupoScreenState createState() => _CrearGrupoScreenState();
+  CrearGrupoScreenState createState() => CrearGrupoScreenState();
 }
 
-class _CrearGrupoScreenState extends State<CrearGrupoScreen> {
+class CrearGrupoScreenState extends State<CrearGrupoScreen> {
   final _formKey = GlobalKey<FormState>();
   final TextEditingController _nombreController = TextEditingController();
 
@@ -52,6 +52,10 @@ class _CrearGrupoScreenState extends State<CrearGrupoScreen> {
         'deviceId': deviceId,
         'joinedAt': FieldValue.serverTimestamp(),
       });
+
+      // ✅ Verificar si el widget aún está montado, context puede no ser válido
+      // si la pantalla se ha cerrado antes de que se complete la operación
+      if (!mounted) return;
 
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Grupo "$nombre" creado correctamente')),
@@ -98,10 +102,10 @@ class _CrearGrupoScreenState extends State<CrearGrupoScreen> {
               const SizedBox(height: 20),
               ElevatedButton(
                 onPressed: _onSubmit,
-                child: const Text('Crear'),
                 style: ElevatedButton.styleFrom(
                   minimumSize: const Size.fromHeight(48),
                 ),
+                child: const Text('Crear'),
               ),
             ],
           ),
@@ -128,9 +132,10 @@ Future<String> _getDeviceId() async {
 Future<String> _generateUniqueGroupCode() async {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
   final random = DateTime.now().millisecondsSinceEpoch.remainder(1000000);
-  final randomString = () => String.fromCharCodes(
+  randomString() => String.fromCharCodes(
     List.generate(6, (index) => chars.codeUnitAt((random + index) % chars.length)),
   );
+ 
 
   String code;
   bool exists = true;
