@@ -59,21 +59,6 @@ class HomeScreen extends StatelessWidget {
                 minimumSize: const Size.fromHeight(50),
               ),
             ),
-            const SizedBox(height: 16),
-            ElevatedButton(
-              onPressed: () async {
-                final ref = FirebaseFirestore.instance.collection('groups').doc();
-                await ref.set({
-                  'name': 'Grupo desde APP',
-                  'groupCode': 'X1Y2Z3',
-                  'createdAt': FieldValue.serverTimestamp(),
-                });
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Grupo creado en Firebase')),
-                );
-              },
-              child: const Text('🚀 Test Firebase'),
-            ),
           ],
         ),
       ),
