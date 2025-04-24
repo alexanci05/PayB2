@@ -16,7 +16,7 @@ class MyApp extends StatelessWidget {
       initialRoute: '/',
       routes: {
         '/': (context) => const MainScreen(),
-        // '/': (context) => const HomeScreen(), // Pantalla principal cuando no se pertenece a ningún grupo
+        //'/': (context) => const HomeScreen(), // Pantalla principal cuando no se pertenece a ningún grupo
         '/crearGrupo': (context) => const CrearGrupoScreen(),
         '/unirseGrupo': (context) => const UnirseGrupoScreen(),
       },
