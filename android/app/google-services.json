@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "785509693993",
+    "project_id": "payb2-5e89e",
+    "storage_bucket": "payb2-5e89e.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:785509693993:android:71e997f36777dde285ba38",
+        "android_client_info": {
+          "package_name": "com.example.payb2"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDlQ4n1tirC7GrWu4Hib_ti4tOxsKOXdDE"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
