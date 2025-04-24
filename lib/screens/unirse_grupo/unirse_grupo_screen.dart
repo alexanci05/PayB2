@@ -1,4 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:device_info_plus/device_info_plus.dart';
+import 'dart:io';
+import 'package:payb2/screens/home/main_screen.dart';
 
 class UnirseGrupoScreen extends StatefulWidget {
   const UnirseGrupoScreen({super.key});
@@ -11,24 +15,88 @@ class UnirseGrupoScreenState extends State<UnirseGrupoScreen> {
   final _formKey = GlobalKey<FormState>();
   final TextEditingController _codigoController = TextEditingController();
 
-  void _onSubmit() {
-    if (_formKey.currentState!.validate()) {
-      final codigo = _codigoController.text.trim();
-      // Aquí llamas a tu lógica de unión a grupo, por ejemplo:
-      // GrupoService.unirseGrupo(codigo);
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Solicitud para unirse al grupo "$codigo" enviada')),
-      );
-      Navigator.pop(context); // Vuelve a la pantalla anterior
-    }
-  }
-
-  @override
+ @override
   void dispose() {
     _codigoController.dispose();
     super.dispose();
   }
+
+  Future<void> _onSubmit() async{
+    if (!_formKey.currentState!.validate()) return;
+
+    final codigoGrupo = _codigoController.text.trim();
+
+    try{
+      // 1. Obtener el deviceId
+      final deviceId = await _getDeviceId();
+
+      // 2. Verificar si el grupo con el código existe
+      final groupQuery = await FirebaseFirestore.instance
+          .collection('groups')
+          .where('groupCode', isEqualTo: codigoGrupo)
+          .get();
+
+      if (!mounted) return;
+
+      if (groupQuery.docs.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('El código de grupo no pertenece a ningún grupo o no es válido')),
+        );
+        return;
+      }
+
+      final groupId = groupQuery.docs.first.id;
+
+      // 3. Verificar si el dispositivo ya es miembro del grupo
+      final memberQuery = await FirebaseFirestore.instance
+          .collection('groupMembers')
+          .where('deviceId', isEqualTo: deviceId)
+          .where('groupId', isEqualTo: groupId)
+          .get();
+
+      if (!mounted) return;
+
+      if (memberQuery.docs.isNotEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Ya eres miembro de este grupo')),
+        );
+        return;
+      }
+
+      // 4. Crear el groupMember
+      final memberRef = FirebaseFirestore.instance
+          .collection('groupMembers')
+          .doc('${groupId}_$deviceId');
+
+      await memberRef.set({
+        'groupId': groupId,
+        'deviceId': deviceId,
+        'joinedAt': FieldValue.serverTimestamp(),
+      });
+
+      // ✅ Verificar si el widget aún está montado, context puede no ser válido
+      // si la pantalla se ha cerrado antes de que se complete la operación
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Te has unido al grupo exitosamente')),
+      );
+
+      // Volver a la pantalla principal en caso de éxito
+      Navigator.pushAndRemoveUntil(
+        context,
+        MaterialPageRoute(builder: (context) => const MainScreen()),
+        (Route<dynamic> route) => false,
+      );
+
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error: $e')),
+      );
+    }
+  }
+
+ 
 
   @override
   Widget build(BuildContext context) {
@@ -70,5 +138,18 @@ class UnirseGrupoScreenState extends State<UnirseGrupoScreen> {
         ),
       ),
     );
+  }
+}
+
+Future<String> _getDeviceId() async {
+  final deviceInfo = DeviceInfoPlugin();
+  if (Platform.isAndroid) {
+    final androidInfo = await deviceInfo.androidInfo;
+    return androidInfo.id; // o .androidId si prefieres
+  } else if (Platform.isIOS) {
+    final iosInfo = await deviceInfo.iosInfo;
+    return iosInfo.identifierForVendor ?? 'unknown_ios';
+  } else {
+    return 'unknown_device';
   }
 }
