@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:device_info_plus/device_info_plus.dart';
-import 'package:flutter_speed_dial/flutter_speed_dial.dart';
+import 'package:flutter_speed_dial/flutter_speed_dial.dart';  // Biblioteca para el botón flotante con múltiples opciones
+import 'package:payb2/screens/grupo_detalles/grupo_detalle_screen.dart';
 
 // Pantalla principal cuando se pertenece a un grupo
 
@@ -159,6 +160,18 @@ class _GroupsScreenState extends State<GroupsScreen> {
             final data = docs[i].data()! as Map<String, dynamic>;
             return Card(
               child: ListTile(
+                onTap: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => GrupoDetalleScreen(
+                        groupId: docs[i].id,
+                        groupName: data['name'] ?? 'Sin nombre',
+                        currentdeviceId: deviceId!,
+                      ),
+                    ),
+                  );
+                },
                 title: Text(data['name'] ?? '—'),
                 subtitle: Text('Código: ${data['groupCode']}'),
               ),
