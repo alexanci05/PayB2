@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'dart:io';
-import 'package:payb2/screens/home/main_screen.dart';
+import 'package:payb2/screens/grupo_detalles/grupo_detalle_screen.dart';
 
 class UnirseGrupoScreen extends StatefulWidget {
   const UnirseGrupoScreen({super.key});
@@ -45,7 +45,9 @@ class UnirseGrupoScreenState extends State<UnirseGrupoScreen> {
         return;
       }
 
-      final groupId = groupQuery.docs.first.id;
+      final doc     = groupQuery.docs.first;
+      final groupId = doc.id;
+      final nombre = doc.data()['name'];
 
       // 3. Verificar si el dispositivo ya es miembro del grupo
       final memberQuery = await FirebaseFirestore.instance
@@ -83,10 +85,22 @@ class UnirseGrupoScreenState extends State<UnirseGrupoScreen> {
       );
 
       // Volver a la pantalla principal en caso de éxito
+      /*
       Navigator.pushAndRemoveUntil(
         context,
         MaterialPageRoute(builder: (context) => const MainScreen()),
         (Route<dynamic> route) => false,
+      );
+      */
+      Navigator.pushAndRemoveUntil(
+        context,
+        MaterialPageRoute(
+          builder: (_) => GrupoDetalleScreen(
+            groupId: groupId,
+            groupName: nombre,
+            currentDeviceId: deviceId,
+          )),
+         (Route<dynamic> route) => false,
       );
 
     } catch (e) {

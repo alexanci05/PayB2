@@ -14,11 +14,28 @@ class CrearGrupoScreen extends StatefulWidget {
 class CrearGrupoScreenState extends State<CrearGrupoScreen> {
   final _formKey = GlobalKey<FormState>();
   final TextEditingController _nombreController = TextEditingController();
+  final List<TextEditingController> _miembrosControllers = [];
 
   @override
   void dispose() {
     _nombreController.dispose();
+    for (final controller in _miembrosControllers) {
+      controller.dispose();
+    }
     super.dispose();
+  }
+
+  void _agregarCampoMiembro() {
+    setState(() {
+      _miembrosControllers.add(TextEditingController());
+    });
+  }
+
+  void _quitarCampoMiembro(int index) {
+    setState(() {
+      _miembrosControllers[index].dispose();
+      _miembrosControllers.removeAt(index);
+    });
   }
 
   Future<void> _onSubmit() async {
@@ -27,14 +44,12 @@ class CrearGrupoScreenState extends State<CrearGrupoScreen> {
     final nombre = _nombreController.text.trim();
 
     try {
-      // 1. Obtener el deviceId
       final deviceId = await _getDeviceId();
-
-      // 2. Crear el grupo
       final groupRef = FirebaseFirestore.instance.collection('groups').doc();
       final groupId = groupRef.id;
-      final groupCode = await _generateUniqueGroupCode(); 
+      final groupCode = await _generateUniqueGroupCode();
 
+      // 1. Crear el grupo
       await groupRef.set({
         'name': nombre,
         'createdAt': FieldValue.serverTimestamp(),
@@ -42,7 +57,7 @@ class CrearGrupoScreenState extends State<CrearGrupoScreen> {
         'ownerDeviceId': deviceId,
       });
 
-      // 3. Crear el groupMember
+      // 2. Añadir miembro creador a groupMembers
       final memberRef = FirebaseFirestore.instance
           .collection('groupMembers')
           .doc('${groupId}_$deviceId');
@@ -53,8 +68,25 @@ class CrearGrupoScreenState extends State<CrearGrupoScreen> {
         'joinedAt': FieldValue.serverTimestamp(),
       });
 
-      // ✅ Verificar si el widget aún está montado, context puede no ser válido
-      // si la pantalla se ha cerrado antes de que se complete la operación
+      // Después de crear el grupo y al añadir al miembro “creador”:
+      await groupRef
+        .collection('members')
+        .add({'name': 'Alex', 'reclamadoPor': deviceId});
+
+
+
+      // 3. Añadir miembros del grupo (si hay)
+      final membersCollection = groupRef.collection('members');
+      for (final controller in _miembrosControllers) {
+        final name = controller.text.trim();
+        if (name.isNotEmpty) {
+          await membersCollection.add({
+            'name': name,
+            'reclamadoPor': null,   // fuerza que exista el campo en null
+          });
+        }
+      }
+
       if (!mounted) return;
 
       ScaffoldMessenger.of(context).showSnackBar(
@@ -83,8 +115,7 @@ class CrearGrupoScreenState extends State<CrearGrupoScreen> {
         padding: const EdgeInsets.all(16.0),
         child: Form(
           key: _formKey,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
+          child: ListView(
             children: [
               TextFormField(
                 controller: _nombreController,
@@ -98,6 +129,37 @@ class CrearGrupoScreenState extends State<CrearGrupoScreen> {
                   }
                   return null;
                 },
+              ),
+              const SizedBox(height: 20),
+              const Text('Miembros del grupo (opcional):'),
+              ..._miembrosControllers.asMap().entries.map((entry) {
+                final index = entry.key;
+                final controller = entry.value;
+                return Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: TextFormField(
+                          controller: controller,
+                          decoration: InputDecoration(
+                            labelText: 'Miembro ${index + 1}',
+                            border: const OutlineInputBorder(),
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.remove_circle, color: Colors.red),
+                        onPressed: () => _quitarCampoMiembro(index),
+                      ),
+                    ],
+                  ),
+                );
+              }),
+              TextButton.icon(
+                onPressed: _agregarCampoMiembro,
+                icon: const Icon(Icons.add),
+                label: const Text('Añadir miembro'),
               ),
               const SizedBox(height: 20),
               ElevatedButton(
@@ -114,6 +176,7 @@ class CrearGrupoScreenState extends State<CrearGrupoScreen> {
     );
   }
 }
+
 
 
 Future<String> _getDeviceId() async {

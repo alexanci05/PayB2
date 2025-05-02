@@ -167,7 +167,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
                       builder: (_) => GrupoDetalleScreen(
                         groupId: docs[i].id,
                         groupName: data['name'] ?? 'Sin nombre',
-                        currentdeviceId: deviceId!,
+                        currentDeviceId: deviceId!,
                       ),
                     ),
                   );
@@ -194,22 +194,6 @@ class WalletScreen extends StatelessWidget {
         children: [
           Text('Pantalla Cartera - en construcción'),
           const SizedBox(height: 16),
-          ElevatedButton(
-            onPressed: () async {
-              final ref = FirebaseFirestore.instance.collection('groups').doc();
-              await ref.set({
-                'name': 'Grupo desde APP 3 ',
-                'groupCode': 'X1Y2Z3',
-                'createdAt': FieldValue.serverTimestamp(),
-              });
-              if (context.mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Grupo creado en Firebase')),
-                );
-              }
-            },
-            child: const Text('🚀 Test Firebase'),
-          ),
         ],
       ),
     );
