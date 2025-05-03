@@ -3,6 +3,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'dart:io';
 import 'package:payb2/screens/grupo_detalles/grupo_detalle_screen.dart';
+import 'package:payb2/screens/home/main_screen.dart';
 
 class UnirseGrupoScreen extends StatefulWidget {
   const UnirseGrupoScreen({super.key});
@@ -94,13 +95,8 @@ class UnirseGrupoScreenState extends State<UnirseGrupoScreen> {
       */
       Navigator.pushAndRemoveUntil(
         context,
-        MaterialPageRoute(
-          builder: (_) => GrupoDetalleScreen(
-            groupId: groupId,
-            groupName: nombre,
-            currentDeviceId: deviceId,
-          )),
-         (Route<dynamic> route) => false,
+        MaterialPageRoute(builder: (context) => const MainScreen()),
+        (Route<dynamic> route) => false,
       );
 
     } catch (e) {

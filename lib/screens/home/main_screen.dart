@@ -183,22 +183,187 @@ class _GroupsScreenState extends State<GroupsScreen> {
   }
 }
 
-class WalletScreen extends StatelessWidget {
+class WalletScreen extends StatefulWidget {
   const WalletScreen({super.key});
-  
+
+  @override
+  State<WalletScreen> createState() => _WalletScreenState();
+}
+
+class _WalletScreenState extends State<WalletScreen> {
+  String? _deviceId;
+  late Future<List<_DebtItem>> _futureDebts;
+
+  @override
+  void initState() {
+    super.initState();
+    _futureDebts = _loadDebts();
+  }
+
+  Future<String> _loadDeviceId() async {
+    final id = await getDeviceId();
+    return id;
+  }
+
+  Future<List<_DebtItem>> _loadDebts() async {
+    final deviceId = await _loadDeviceId();
+
+    // 1) Obtén todos los groupIds donde estés
+    final memberQ = await FirebaseFirestore.instance
+        .collection('groupMembers')
+        .where('deviceId', isEqualTo: deviceId)
+        .get();
+    final groupIds = memberQ.docs.map((d) => d['groupId'] as String).toList();
+
+    final debts = <_DebtItem>[];
+
+    // 2) Por cada grupo...
+    for (final gid in groupIds) {
+      // a) Recupera nombre de grupo
+      final groupDoc = await FirebaseFirestore.instance
+          .collection('groups').doc(gid).get();
+      final groupName = groupDoc['name'] as String? ?? 'Grupo';
+
+      // b) Carga todos los miembros de ese grupo y crea memberMap
+      final membersSnap = await FirebaseFirestore.instance
+          .collection('groups').doc(gid)
+          .collection('members')
+          .get();
+      final Map<String, String> memberMap = {
+        for (var m in membersSnap.docs)
+          m.id: (m.data()['name'] as String? ?? '—'),
+      };
+
+      // c) Encuentra tu phantom memberId en ese grupo
+      final phantomSnap = membersSnap.docs.firstWhere(
+        (m) => (m.data()['reclamadoPor'] as String?) == deviceId,
+        orElse: () => throw StateError('No phantom en $gid'),
+      );
+      final phantomId = phantomSnap.id;
+
+      // d) Recorre todos los gastos
+      final gastosSnap = await FirebaseFirestore.instance
+          .collection('groups').doc(gid)
+          .collection('gastos')
+          .get();
+
+      for (final gastoDoc in gastosSnap.docs) {
+        final gastoData = gastoDoc.data();
+        final gastoName = gastoData['nombre'] as String? ?? 'Gasto';
+        final pagadoPorId = gastoData['pagadoPor'] as String? ?? '';
+
+        // e) Busca en splits solo tu parte
+        final splitsSnap = await gastoDoc.reference
+            .collection('divisiones')
+            .where('memberId', isEqualTo: phantomId)
+            .get();
+
+        for (final splitDoc in splitsSnap.docs) {
+          final splitData = splitDoc.data();
+          final amount = (splitData['cantidad'] as num).toDouble();
+
+          // Solo si debes y no eres tú quien pagó
+          if (amount > 0 && pagadoPorId != phantomId) {
+            debts.add(_DebtItem(
+              groupId:     gid,
+              groupName:   groupName,
+              gastoId:     gastoDoc.id,
+              gastoName:   gastoName,
+              amount:      amount,
+              pagadoPorId: pagadoPorId,
+              pagadoPorName: memberMap[pagadoPorId] ?? 'Otro',
+              myPhantomId: phantomId,
+            ));
+          }
+        }
+      }
+    }
+
+    return debts;
+  }
+
 
   @override
   Widget build(BuildContext context) {
-    return Center(   
-      child: Column(
-        children: [
-          Text('Pantalla Cartera - en construcción'),
-          const SizedBox(height: 16),
-        ],
-      ),
+    return FutureBuilder<List<_DebtItem>>(
+      future: _futureDebts,
+      builder: (context, snap) {
+        if (snap.connectionState == ConnectionState.waiting) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        if (snap.hasError) {
+          return Center(child: Text('Error: ${snap.error}'));
+        }
+        final debts = snap.data!;
+        if (debts.isEmpty) {
+          return const Center(child: Text('No tienes deudas pendientes.'));
+        }
+
+        return ListView.builder(
+          padding: const EdgeInsets.all(16),
+          itemCount: debts.length,
+          itemBuilder: (context, i) {
+            final d = debts[i];
+            return Card(
+              margin: const EdgeInsets.symmetric(vertical: 6),
+              child: ListTile(
+                title: Text(d.gastoName),
+                subtitle: Text(
+                  '${d.groupName}\nDebes €${d.amount.toStringAsFixed(2)} a ${d.pagadoPorName}',
+                ),
+                isThreeLine: true,
+                trailing: ElevatedButton(
+                  onPressed: () async {
+                    // Marcar como pagado: elimina o actualiza el split
+                    await FirebaseFirestore.instance
+                        .collection('groups').doc(d.groupId)
+                        .collection('gastos').doc(d.gastoId)
+                        .collection('divisiones').where('memberId', isEqualTo: d.myPhantomId)
+                        .get()
+                        .then((snap) {
+                      for (var doc in snap.docs) {
+                        doc.reference.update({'amount': 0, 'settled': true});
+                      }
+                    });
+                    // Refrescar lista
+                    setState(() {
+                      _futureDebts = _loadDebts();
+                    });
+                  },
+                  child: const Text('Marcar pagado'),
+                ),
+              ),
+            );
+          },
+        );
+      },
     );
   }
 }
+
+/// Clase interna para representar cada deuda
+class _DebtItem {
+  final String groupId;
+  final String groupName;
+  final String gastoId;
+  final String gastoName;
+  final double amount;
+  final String pagadoPorId;
+  final String pagadoPorName;  
+  final String myPhantomId;
+
+  _DebtItem({
+    required this.groupId,
+    required this.groupName,
+    required this.gastoId,
+    required this.gastoName,
+    required this.amount,
+    required this.pagadoPorId,
+    required this.pagadoPorName, 
+    required this.myPhantomId,
+  });
+}
+
 
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});

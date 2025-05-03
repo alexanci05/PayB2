@@ -23,14 +23,38 @@ class GrupoDetalleScreen extends StatefulWidget {
 class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
   String? _myMemberId;
   List<Map<String,String>> _members = [];
+  late Future<Map<String, dynamic>> _miembroYMapa;
 
   @override
   void initState() {
     super.initState();
+    _miembroYMapa = _obtenerMiembroYMapa();
     // esperamos a que termine el primer frame
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _checkOrAskMember();
     });
+  }
+
+   Future<Map<String, dynamic>> _obtenerMiembroYMapa() async {
+    final snap = await FirebaseFirestore.instance
+        .collection('groups')
+        .doc(widget.groupId)
+        .collection('members')
+        .get();
+
+    final members = snap.docs;
+
+    // Mapa ID → nombre
+    final memberMap = {
+      for (var m in members) m.id: {
+        'name': m['name'],
+        'reclamadoPor': m['reclamadoPor'],
+      }
+    };
+
+    return {
+      'memberMap': memberMap,
+    };
   }
 
   Future<void> _checkOrAskMember() async {
@@ -128,39 +152,60 @@ class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
     );
   }
 
-   @override
+ @override
   Widget build(BuildContext context) {
-    return DefaultTabController(
-      length: 3,
-      child: Scaffold(
-        appBar: AppBar(
-          title: Text(widget.groupName),
-          bottom: const TabBar(tabs: [
-            Tab(text: 'Gastos'), Tab(text: 'Saldos'), Tab(text: 'Estadísticas'),
-          ]),
-        ),
-        body: TabBarView(children: [
-          GastosView(groupId: widget.groupId),
-          SaldosView(
-            groupId: widget.groupId,
-            currentDeviceId: widget.currentDeviceId,
+    return FutureBuilder<Map<String, dynamic>>(
+      future: _miembroYMapa,
+      builder: (context, snapshot) {
+        if (!snapshot.hasData) {
+          return const Scaffold(
+            body: Center(child: CircularProgressIndicator()),
+          );
+        }
+
+        final memberMap = snapshot.data!['memberMap'] as Map<String, Map<String, dynamic>>;
+
+        return DefaultTabController(
+          length: 3,
+          child: Scaffold(
+            appBar: AppBar(
+              title: Text(widget.groupName),
+              bottom: const TabBar(tabs: [
+                Tab(text: 'Gastos'),
+                Tab(text: 'Saldos'),
+                Tab(text: 'Estadísticas'),
+              ]),
+            ),
+            body: TabBarView(children: [
+              GastosView(
+                groupId: widget.groupId,
+                memberMap: memberMap,
+              ),
+              SaldosView(
+                groupId: widget.groupId,
+                currentDeviceId: widget.currentDeviceId,
+                memberMap: memberMap,
+              ),
+              const EstadisticasView(),
+            ]),
+            floatingActionButton: FloatingActionButton(
+              onPressed: () => _onCrearGasto(context),
+              child: const Icon(Icons.add),
+            ),
           ),
-          const EstadisticasView(),
-        ]),
-        floatingActionButton: FloatingActionButton(
-          onPressed: () => _onCrearGasto(context),
-          child: const Icon(Icons.add),
-        ),
-      ),
+        );
+      },
     );
   }
+
 }
 
 // Pantalla de Gastos ------------------------------------------
 class GastosView extends StatefulWidget {
   final String groupId;
+  final Map<String, Map<String, dynamic>> memberMap;
 
-  const GastosView({super.key, required this.groupId});
+  const GastosView({super.key, required this.groupId, required this.memberMap});
 
   @override
   State<GastosView> createState() => _GastosViewState();
@@ -193,6 +238,7 @@ class _GastosViewState extends State<GastosView> {
             'amount': data['cantidad'],
             'date': (data['fecha'] as Timestamp).toDate(),
             'description': data['descripcion'],
+            'pagadoPor' : data['pagadoPor']
           };
         }).toList();
 
@@ -225,6 +271,7 @@ class _GastosViewState extends State<GastosView> {
                       crossAxisAlignment: CrossAxisAlignment.end,
                       children: [
                         Text('${gasto['amount'].toStringAsFixed(2)} €', style: const TextStyle(fontWeight: FontWeight.bold)),
+                        Text(widget.memberMap[gasto['pagadoPor']]?['name']),
                         IconButton(
                           icon: const Icon(Icons.delete, color: Colors.red),
                           onPressed: () async {
@@ -251,11 +298,13 @@ class _GastosViewState extends State<GastosView> {
 class SaldosView extends StatelessWidget {
   final String groupId;
   final String currentDeviceId;
+  final Map<String, Map<String, dynamic>> memberMap;
 
   const SaldosView({
     super.key,
     required this.groupId,
     required this.currentDeviceId,
+    required this.memberMap,
   });
 
   @override
@@ -266,22 +315,23 @@ class SaldosView extends StatelessWidget {
           .where('groupId', isEqualTo: groupId)
           .snapshots(),
       builder: (context, snap) {
-        if (snap.hasError) return Center(child: Text('Error: ${snap.error}'));
+        if (snap.hasError) return Center(child: Text('Error: \${snap.error}'));
         if (snap.connectionState == ConnectionState.waiting) {
           return const Center(child: CircularProgressIndicator());
-        }     
+        }
 
+        final divisiones = snap.data!.docs;
 
         // 1) Agrupa y suma los splits por memberId
         final totals = <String, double>{};
-        for (var doc in snap.data!.docs) {
+        for (var doc in divisiones) {
           final data = doc.data()! as Map<String, dynamic>;
           final memberId = data['memberId'] as String;
-          final amount   = (data['cantidad'] as num).toDouble();
+          final amount = (data['cantidad'] as num).toDouble();
           totals[memberId] = (totals[memberId] ?? 0) + amount;
         }
 
-        // 2) Recupera la lista de miembros del grupo
+        // 2) Recupera miembros
         return FutureBuilder<QuerySnapshot>(
           future: FirebaseFirestore.instance
               .collection('groups')
@@ -292,34 +342,69 @@ class SaldosView extends StatelessWidget {
             if (membersSnap.connectionState == ConnectionState.waiting) {
               return const Center(child: CircularProgressIndicator());
             }
-            final members = membersSnap.data!.docs;
 
-            // 3) Construye la lista de saldos
+            final members = membersSnap.data!.docs;
+            final memberMap = {
+              for (var m in members) m.id: m.data() as Map<String, dynamic>,
+            };
+
+            String? myMemberId;
+            try {
+              final myMember = members.firstWhere((m) => m['reclamadoPor'] == currentDeviceId);
+              myMemberId = myMember.id;
+            } catch (e) {
+              myMemberId = null;
+            }
+
             return ListView.builder(
               padding: const EdgeInsets.all(16),
               itemCount: members.length,
               itemBuilder: (context, i) {
                 final m = members[i];
-                final name     = m['name'] as String;
+                final name = m['name'] as String;
                 final memberId = m.id;
-                final balance  = totals[memberId] ?? 0.0;
-                final isMe     = memberId == currentDeviceId;
+                final balance = totals[memberId] ?? 0.0;
+                final isMe = m['reclamadoPor'] == currentDeviceId;
 
-                return ListTile(
-                  leading: CircleAvatar(child: Text(name[0])),
-                  title: Text(
-                    name,
-                    style: TextStyle(
-                      fontWeight: isMe ? FontWeight.bold : FontWeight.normal,
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    ListTile(
+                      leading: CircleAvatar(child: Text(name[0])),
+                      title: Text(
+                        name,
+                        style: TextStyle(
+                          fontWeight:
+                              isMe ? FontWeight.bold : FontWeight.normal,
+                        ),
+                      ),
+                      trailing: Text(
+                        '${balance.toStringAsFixed(2)} €',
+                        style: TextStyle(
+                          color: balance <= 0 ? Colors.green : Colors.red,
+                          fontWeight:
+                              isMe ? FontWeight.bold : FontWeight.normal,
+                        ),
+                      ),
                     ),
-                  ),
-                  trailing: Text(
-                    '${balance.toStringAsFixed(2)} €',
-                    style: TextStyle(
-                      color: balance >= 0 ? Colors.green : Colors.red,
-                      fontWeight: isMe ? FontWeight.bold : FontWeight.normal,
-                    ),
-                  ),
+                    if (isMe && balance > 0)
+                      ...divisiones.where((d) => d['memberId'] == myMemberId).map((d) {
+                        final data = d.data()! as Map<String, dynamic>;
+                        final cantidad = (data['cantidad'] as num).toDouble();
+                        final gastoNombre = data['nombre'] ?? 'Gasto';
+                        final pagadoPor = data['pagadoPor'] ?? '';
+                        final nombrePagador = memberMap[pagadoPor]?['name'] ?? 'Otro';
+
+                        return ListTile(
+                          title: Text(gastoNombre),
+                          subtitle: Text('Debes a $nombrePagador'),
+                          trailing: Text('${cantidad.toStringAsFixed(2)} €'),
+                          onTap: () {
+                            // Aquí un diálogo para cambiar estado de la deuda
+                          },
+                        );
+                      }).toList(),
+                  ],
                 );
               },
             );
@@ -329,6 +414,7 @@ class SaldosView extends StatelessWidget {
     );
   }
 }
+
 
 
 class EstadisticasView extends StatelessWidget {

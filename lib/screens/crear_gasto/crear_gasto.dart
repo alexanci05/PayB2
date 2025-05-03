@@ -153,6 +153,8 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
         'cantidad': roundedEach,
         'pagado':  false,
         'created':  FieldValue.serverTimestamp(),
+        'nombre': nombreGasto,
+        'pagadoPor' : _selectedPagadorId
       });
     }
     await batch.commit();
