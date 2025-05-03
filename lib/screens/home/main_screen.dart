@@ -322,7 +322,7 @@ class _WalletScreenState extends State<WalletScreen> {
                         .get()
                         .then((snap) {
                       for (var doc in snap.docs) {
-                        doc.reference.update({'amount': 0, 'settled': true});
+                        doc.reference.update({'cantidad': 0, 'pagado': true});
                       }
                     });
                     // Refrescar lista

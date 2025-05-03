@@ -69,10 +69,11 @@ class CrearGrupoScreenState extends State<CrearGrupoScreen> {
       });
 
       // Después de crear el grupo y al añadir al miembro “creador”:
+      /*
       await groupRef
         .collection('members')
         .add({'name': 'Alex', 'reclamadoPor': deviceId});
-
+      */
 
 
       // 3. Añadir miembros del grupo (si hay)
