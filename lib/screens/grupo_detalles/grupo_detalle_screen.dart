@@ -94,6 +94,8 @@ class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
 
     if (_members.isEmpty) return; // nada que reclamar
 
+    if (!mounted) return; 
+
     // 3) Abrir diálogo
     final chosen = await showDialog<String>(
       context: context,
@@ -121,7 +123,6 @@ class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
         ],
       ),
     );
-
 
     if (chosen == null) return; // si canceló
 
@@ -173,18 +174,34 @@ class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
                 Tab(text: 'Estadísticas'),
               ]),
             ),
-            body: TabBarView(children: [
-              GastosView(
-                groupId: widget.groupId,
-                memberMap: memberMap,
-              ),
-              SaldosView(
-                groupId: widget.groupId,
-                currentDeviceId: widget.currentDeviceId,
-                memberMap: memberMap,
-              ),
-              const EstadisticasView(),
-            ]),
+            body: Column(
+              children: [
+                if (_myMemberId != null)
+                  Padding(
+                    padding: const EdgeInsets.all(8.0),
+                    child: Text(
+                      'Eres: ${memberMap[_myMemberId]?['name'] ?? 'Miembro desconocido'}',
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                Expanded(
+                  child: TabBarView(children: [
+                    GastosView(
+                      groupId: widget.groupId,
+                      memberMap: memberMap,
+                      myMemberId: _myMemberId,
+                    ),
+                    SaldosView(
+                      groupId: widget.groupId,
+                      currentDeviceId: widget.currentDeviceId,
+                      memberMap: memberMap,
+                      myMemberId: _myMemberId,
+                    ),
+                    const EstadisticasView(),
+                  ]),
+                ),
+              ],
+            ),
             floatingActionButton: FloatingActionButton(
               onPressed: () => _onCrearGasto(context),
               child: const Icon(Icons.add),
@@ -201,8 +218,14 @@ class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
 class GastosView extends StatefulWidget {
   final String groupId;
   final Map<String, Map<String, dynamic>> memberMap;
+  final String? myMemberId;
 
-  const GastosView({super.key, required this.groupId, required this.memberMap});
+  const GastosView({
+    super.key,
+    required this.groupId,
+    required this.memberMap,
+    this.myMemberId,
+  });
 
   @override
   State<GastosView> createState() => _GastosViewState();
@@ -235,7 +258,7 @@ class _GastosViewState extends State<GastosView> {
             'amount': data['cantidad'],
             'date': (data['fecha'] as Timestamp).toDate(),
             'description': data['descripcion'],
-            'pagadoPor' : data['pagadoPor']
+            'pagadoPor': data['pagadoPor']
           };
         }).toList();
 
@@ -243,8 +266,11 @@ class _GastosViewState extends State<GastosView> {
           itemCount: gastos.length,
           itemBuilder: (context, index) {
             final gasto = gastos[index];
+            final isMyGasto = gasto['pagadoPor'] == widget.myMemberId;
+
             return Card(
               margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+              color: isMyGasto ? const Color.fromARGB(255, 192, 192, 192) : null, // color distinto si es tu gasto
               child: Padding(
                 padding: const EdgeInsets.all(12.0),
                 child: Row(
@@ -255,11 +281,20 @@ class _GastosViewState extends State<GastosView> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(gasto['name'], style: const TextStyle(fontWeight: FontWeight.bold)),
+                          Text(
+                            gasto['name'],
+                            style: TextStyle(
+                              fontWeight: isMyGasto ? FontWeight.bold : FontWeight.normal,
+                              color: isMyGasto ? Colors.green[800] : null,
+                            ),
+                          ),
                           const SizedBox(height: 4),
                           Text(gasto['description'] ?? ''),
                           const SizedBox(height: 4),
-                          Text(DateFormat('dd/MM/yyyy').format(gasto['date']), style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                          Text(
+                            DateFormat('dd/MM/yyyy').format(gasto['date']),
+                            style: const TextStyle(fontSize: 12, color: Colors.grey),
+                          ),
                         ],
                       ),
                     ),
@@ -267,8 +302,12 @@ class _GastosViewState extends State<GastosView> {
                     Column(
                       crossAxisAlignment: CrossAxisAlignment.end,
                       children: [
-                        Text('${gasto['amount'].toStringAsFixed(2)} €', style: const TextStyle(fontWeight: FontWeight.bold)),
-                        Text(widget.memberMap[gasto['pagadoPor']]?['name']),
+                        Text('${gasto['amount'].toStringAsFixed(2)} €',
+                            style: TextStyle(
+                              fontWeight: isMyGasto ? FontWeight.bold : FontWeight.normal,
+                              color: isMyGasto ? Colors.green[800] : null,
+                            )),
+                        Text(widget.memberMap[gasto['pagadoPor']]?['name'] ?? ''),
                         IconButton(
                           icon: const Icon(Icons.delete, color: Colors.red),
                           onPressed: () async {
@@ -292,16 +331,19 @@ class _GastosViewState extends State<GastosView> {
 }
 
 
+
 class SaldosView extends StatelessWidget {
   final String groupId;
   final String currentDeviceId;
   final Map<String, Map<String, dynamic>> memberMap;
+  final String? myMemberId;
 
   const SaldosView({
     super.key,
     required this.groupId,
     required this.currentDeviceId,
     required this.memberMap,
+    this.myMemberId,
   });
 
   @override
@@ -312,7 +354,7 @@ class SaldosView extends StatelessWidget {
           .where('groupId', isEqualTo: groupId)
           .snapshots(),
       builder: (context, snap) {
-        if (snap.hasError) return Center(child: Text('Error: \${snap.error}'));
+        if (snap.hasError) return Center(child: Text('Error: ${snap.error}'));
         if (snap.connectionState == ConnectionState.waiting) {
           return const Center(child: CircularProgressIndicator());
         }
@@ -328,82 +370,56 @@ class SaldosView extends StatelessWidget {
           totals[memberId] = (totals[memberId] ?? 0) + amount;
         }
 
-        // 2) Recupera miembros
-        return FutureBuilder<QuerySnapshot>(
-          future: FirebaseFirestore.instance
-              .collection('groups')
-              .doc(groupId)
-              .collection('members')
-              .get(),
-          builder: (context, membersSnap) {
-            if (membersSnap.connectionState == ConnectionState.waiting) {
-              return const Center(child: CircularProgressIndicator());
-            }
+        return ListView.builder(
+          padding: const EdgeInsets.all(16),
+          itemCount: memberMap.length,
+          itemBuilder: (context, i) {
+            final memberIds = memberMap.keys.toList();
+            final memberId = memberIds[i];
+            final name = memberMap[memberId]?['name'] ?? 'Sin nombre';
+            final balance = totals[memberId] ?? 0.0;
+            final isMe = memberId == myMemberId;
 
-            final members = membersSnap.data!.docs;
-            final memberMap = {
-              for (var m in members) m.id: m.data() as Map<String, dynamic>,
-            };
-
-            String? myMemberId;
-            try {
-              final myMember = members.firstWhere((m) => m['reclamadoPor'] == currentDeviceId);
-              myMemberId = myMember.id;
-            } catch (e) {
-              myMemberId = null;
-            }
-
-            return ListView.builder(
-              padding: const EdgeInsets.all(16),
-              itemCount: members.length,
-              itemBuilder: (context, i) {
-                final m = members[i];
-                final name = m['name'] as String;
-                final memberId = m.id;
-                final balance = totals[memberId] ?? 0.0;
-                final isMe = m['reclamadoPor'] == currentDeviceId;
-
-                return Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    ListTile(
-                      leading: CircleAvatar(child: Text(name[0])),
-                      title: Text(
-                        name,
-                        style: TextStyle(
-                          fontWeight:
-                              isMe ? FontWeight.bold : FontWeight.normal,
-                        ),
-                      ),
-                      trailing: Text(
-                        '${balance.toStringAsFixed(2)} €',
-                        style: TextStyle(
-                          color: balance <= 0 ? Colors.green : Colors.red,
-                          fontWeight:
-                              isMe ? FontWeight.bold : FontWeight.normal,
-                        ),
-                      ),
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                ListTile(
+                  leading: CircleAvatar(child: Text(name[0])),
+                  title: Text(
+                    name,
+                    style: TextStyle(
+                      fontWeight: isMe ? FontWeight.bold : FontWeight.normal,
                     ),
-                    if (isMe && balance > 0)
-                      ...divisiones.where((d) => d['memberId'] == myMemberId).map((d) {
-                        final data = d.data()! as Map<String, dynamic>;
-                        final cantidad = (data['cantidad'] as num).toDouble();
-                        final gastoNombre = data['nombre'] ?? 'Gasto';
-                        final pagadoPor = data['pagadoPor'] ?? '';
-                        final nombrePagador = memberMap[pagadoPor]?['name'] ?? 'Otro';
+                  ),
+                  trailing: Text(
+                    '${balance.toStringAsFixed(2)} €',
+                    style: TextStyle(
+                      color: balance <= 0 ? Colors.green : Colors.red,
+                      fontWeight: isMe ? FontWeight.bold : FontWeight.normal,
+                    ),
+                  ),
+                ),
+                if (isMe && balance > 0)
+                  ...divisiones.where((d) {
+                    final data = d.data()! as Map<String, dynamic>;
+                    return data['memberId'] == myMemberId;
+                  }).map((d) {
+                    final data = d.data()! as Map<String, dynamic>;
+                    final cantidad = (data['cantidad'] as num).toDouble();
+                    final gastoNombre = data['nombre'] ?? 'Gasto';
+                    final pagadoPor = data['pagadoPor'] ?? '';
+                    final nombrePagador = memberMap[pagadoPor]?['name'] ?? 'Otro';
 
-                        return ListTile(
-                          title: Text(gastoNombre),
-                          subtitle: Text('Debes a $nombrePagador'),
-                          trailing: Text('${cantidad.toStringAsFixed(2)} €'),
-                          onTap: () {
-                            // Aquí un diálogo para cambiar estado de la deuda
-                          },
-                        );
-                      }).toList(),
-                  ],
-                );
-              },
+                    return ListTile(
+                      title: Text(gastoNombre),
+                      subtitle: Text('Debes a $nombrePagador'),
+                      trailing: Text('${cantidad.toStringAsFixed(2)} €'),
+                      onTap: () {
+                        // Aquí un diálogo para cambiar estado de la deuda
+                      },
+                    );
+                  }),
+              ],
             );
           },
         );

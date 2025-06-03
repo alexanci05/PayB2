@@ -47,7 +47,6 @@ class UnirseGrupoScreenState extends State<UnirseGrupoScreen> {
 
       final doc     = groupQuery.docs.first;
       final groupId = doc.id;
-      final nombre = doc.data()['name'];
 
       // 3. Verificar si el dispositivo ya es miembro del grupo
       final memberQuery = await FirebaseFirestore.instance

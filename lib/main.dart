@@ -57,12 +57,8 @@ Future<void> _requestNotificationPermission() async {
   // Android 13+ usa permission_handler
   if (await Permission.notification.isDenied ||
       await Permission.notification.isPermanentlyDenied) {
-    final status = await Permission.notification.request();
-    if (status.isGranted) {
-      print('✅ Permiso de notificaciones concedido (Android)');
-    } else {
-      print('❌ Permiso de notificaciones denegado (Android)');
-    }
+    await Permission.notification.request();
+
   }
 
   // iOS también puede pedir permisos explícitamente

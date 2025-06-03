@@ -350,7 +350,7 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
                       value: _selectedParticipants.contains(id),
                       onChanged: (v) => _onToggleParticipant(id, v),
                     );
-                  }).toList(),
+                  }),
 
                   const SizedBox(height: 20),
                   Center(

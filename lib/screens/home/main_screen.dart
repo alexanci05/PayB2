@@ -194,7 +194,6 @@ class WalletScreen extends StatefulWidget {
 }
 
 class _WalletScreenState extends State<WalletScreen> {
-  String? _deviceId;
   late Future<List<_DebtItem>> _futureDebts;
 
   @override
