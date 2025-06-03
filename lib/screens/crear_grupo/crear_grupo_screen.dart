@@ -3,6 +3,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'dart:io';
 import 'package:payb2/screens/home/main_screen.dart';
+import 'dart:math';
 
 class CrearGrupoScreen extends StatefulWidget {
   const CrearGrupoScreen({super.key});
@@ -132,7 +133,7 @@ class CrearGrupoScreenState extends State<CrearGrupoScreen> {
                 },
               ),
               const SizedBox(height: 20),
-              const Text('Miembros del grupo (opcional):'),
+              const Text('Miembros del grupo (minimo 1):'),
               ..._miembrosControllers.asMap().entries.map((entry) {
                 final index = entry.key;
                 final controller = entry.value;
@@ -195,10 +196,12 @@ Future<String> _getDeviceId() async {
 
 Future<String> _generateUniqueGroupCode() async {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-  final random = DateTime.now().millisecondsSinceEpoch.remainder(1000000);
-  randomString() => String.fromCharCodes(
-    List.generate(6, (index) => chars.codeUnitAt((random + index) % chars.length)),
-  );
+  final rand = Random();
+
+  String randomString() => String.fromCharCodes(
+        List.generate(6, (_) => chars.codeUnitAt(rand.nextInt(chars.length))),
+      );
+
  
 
   String code;

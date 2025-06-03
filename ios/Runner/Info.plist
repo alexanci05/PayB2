@@ -45,5 +45,20 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+
+	<key>UIBackgroundModes</key>
+	<array>
+	<string>fetch</string>
+	<string>remote-notification</string>
+	</array>
+
+	<key>NSUserNotificationAlertUsageDescription</key>
+	<string>Esta app quiere enviarte notificaciones.</string>
+	<key>NSUserNotificationSoundUsageDescription</key>
+	<string>Esta app quiere usar sonidos en las notificaciones.</string>
+	<key>NSUserNotificationBadgeUsageDescription</key>
+	<string>Esta app quiere actualizar el ícono con un número.</string>
+
+
 </dict>
 </plist>

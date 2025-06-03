@@ -60,7 +60,7 @@ class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
   Future<void> _checkOrAskMember() async {
     final db = FirebaseFirestore.instance;
 
-    // 1) ¿Ya reclama? 
+    // 1) ¿Ya reclamado? 
     final snapReclamado = await FirebaseFirestore.instance
     .collection('groups')
     .doc(widget.groupId)
@@ -121,9 +121,6 @@ class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
         ],
       ),
     );
-
-
-    print('>>> Reclamo phantom member: $chosen');
 
 
     if (chosen == null) return; // si canceló

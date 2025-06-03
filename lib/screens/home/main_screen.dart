@@ -3,6 +3,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter_speed_dial/flutter_speed_dial.dart';  // Biblioteca para el botón flotante con múltiples opciones
 import 'package:payb2/screens/grupo_detalles/grupo_detalle_screen.dart';
+import 'package:payb2/notifications.dart';
 
 // Pantalla principal cuando se pertenece a un grupo
 
@@ -134,7 +135,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
       return FirebaseFirestore.instance.collection('groups').doc(id).get();
     });
     return await Future.wait(futures);
-  }
+  } 
 
   @override
   Widget build(BuildContext context) {
@@ -311,26 +312,41 @@ class _WalletScreenState extends State<WalletScreen> {
                 subtitle: Text(
                   '${d.groupName}\nDebes €${d.amount.toStringAsFixed(2)} a ${d.pagadoPorName}',
                 ),
-                isThreeLine: true,
-                trailing: ElevatedButton(
-                  onPressed: () async {
-                    // Marcar como pagado: elimina o actualiza el split
-                    await FirebaseFirestore.instance
-                        .collection('groups').doc(d.groupId)
-                        .collection('gastos').doc(d.gastoId)
-                        .collection('divisiones').where('memberId', isEqualTo: d.myPhantomId)
-                        .get()
-                        .then((snap) {
-                      for (var doc in snap.docs) {
-                        doc.reference.update({'cantidad': 0, 'pagado': true});
-                      }
-                    });
-                    // Refrescar lista
-                    setState(() {
-                      _futureDebts = _loadDebts();
-                    });
-                  },
-                  child: const Text('Marcar pagado'),
+                  isThreeLine: true,
+                  trailing: Row(
+                  mainAxisSize: MainAxisSize.min, // para que no ocupe todo el ancho
+                  children: [
+                    ElevatedButton(
+                      onPressed: () async {
+                        // Marcar como pagado: elimina o actualiza el split
+                        await FirebaseFirestore.instance
+                            .collection('groups').doc(d.groupId)
+                            .collection('gastos').doc(d.gastoId)
+                            .collection('divisiones').where('memberId', isEqualTo: d.myPhantomId)
+                            .get()
+                            .then((snap) {
+                          for (var doc in snap.docs) {
+                            doc.reference.update({'cantidad': 0, 'pagado': true});
+                          }
+                        });
+                        // Refrescar lista
+                        setState(() {
+                          _futureDebts = _loadDebts();
+                        });
+                      },
+                      child: const Text('Marcar pagado'),
+                    ),
+                    const SizedBox(width: 8), // espacio entre botones
+                    ElevatedButton(
+                      onPressed: () {
+                        mostrarNotificacion(
+                          titulo: d.gastoName,
+                          cuerpo: d.amount.toString(),  // convertir a String
+                        );
+                      },
+                      child: const Text('Mostrar noti'),
+                    ),
+                  ],
                 ),
               ),
             );

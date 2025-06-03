@@ -1,4 +1,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Permiso para las notificaciones -->
+    <uses-permission
+        android:name="android.permission.POST_NOTIFICATIONS"/>
+
     <application
         android:label="payb2"
         android:name="${applicationName}"

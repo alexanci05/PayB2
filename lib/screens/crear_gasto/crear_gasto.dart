@@ -52,7 +52,7 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
     });
   }
   
-   void _onToggleSelectAll(bool? v) {
+  void _onToggleSelectAll(bool? v) {
     setState(() {
       _selectAll = v ?? false;
       if (_selectAll) {
@@ -69,10 +69,11 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
 
   void _onToggleParticipant(String id, bool? v) {
     setState(() {
-      if (v == true)
+      if (v == true){
         _selectedParticipants.add(id);
-      else
+      }else{
         _selectedParticipants.remove(id);
+      }
       // si no están todos marcados, quita selectAll
       _selectAll = _usuarios
           .where((u) => u['id'] != _selectedPagadorId)
