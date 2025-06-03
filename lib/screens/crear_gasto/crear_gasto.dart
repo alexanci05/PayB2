@@ -24,16 +24,31 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
   List<Map<String, dynamic>> _usuarios = [];
   String? _selectedPagadorId;
 
-   /// IDs de los usuarios marcados para participar (sin el pagador)
+   // IDs de los usuarios marcados para participar (sin el pagador)
   Set<String> _selectedParticipants = {};
 
-  /// Checkbox “Seleccionar todos”
+  // Checkbox “Seleccionar todos”
   bool _selectAll = false;
+
+  // Para el gasto periodico
+  bool _esPeriodico = false;
+  String? _frecuenciaSeleccionada;
+  final List<String> _frecuencias = [
+    'Cada 7 días',
+    'Cada 15 días',
+    'Cada 30 días',
+    'Cada 365 días',
+    'Mensual (mismo día todos los meses)',
+    'Trimestral (mismo día cada 3 meses)',
+    'Anual (mismo día cada año)',
+  ];
+
 
 
   @override
   void initState() {
     super.initState();
+    _selectedDate = DateTime.now(); // valor por defecto: hoy
     _cargarUsuarios();
   }
 
@@ -129,36 +144,41 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
         'fecha':     fecha,
         'created':   FieldValue.serverTimestamp(),
         'pagadoPor': _selectedPagadorId,
+        'frecuencia': _frecuenciaSeleccionada
       });
+    
 
     final gastoId = gastoRef.id;
 
-    // 2. Calcular cuánto debe cada uno
-    final rawEach = cantidad / (participants.length + 1);
-    final roundedEach = double.parse(rawEach.toStringAsFixed(2));
+     // 2. Ahora calculamos si la fecha del gasto es de hoy o previa para no crear divisiones si la fecha aun no ha llegado
+    final now = DateTime.now();
+    final debeCrearDivisiones = !fecha.isAfter(now);
+    if (debeCrearDivisiones) {
+      final rawEach = cantidad / (participants.length + 1);
+      final roundedEach = double.parse(rawEach.toStringAsFixed(2));
 
-    // 3. Insertar divisiones como subcolección del gasto
-    final batch = firestore.batch();
-    for (var memberId in participants) {
-      final divisionesRef = firestore
-        .collection('groups')
-        .doc(widget.groupId)
-        .collection('gastos')
-        .doc(gastoId)
-        .collection('divisiones')
-        .doc(); // auto-ID
+      final batch = firestore.batch();
+      for (var memberId in participants) {
+        final divisionesRef = firestore
+            .collection('groups')
+            .doc(widget.groupId)
+            .collection('gastos')
+            .doc(gastoId)
+            .collection('divisiones')
+            .doc();
 
-      batch.set(divisionesRef, {
-        'memberId': memberId,
-        'groupId':  widget.groupId, 
-        'cantidad': roundedEach,
-        'pagado':  false,
-        'created':  FieldValue.serverTimestamp(),
-        'nombre': nombreGasto,
-        'pagadoPor' : _selectedPagadorId,
-      });
+        batch.set(divisionesRef, {
+          'memberId': memberId,
+          'groupId': widget.groupId,
+          'cantidad': roundedEach,
+          'pagado': false,
+          'created': FieldValue.serverTimestamp(),
+          'nombre': nombreGasto,
+          'pagadoPor': _selectedPagadorId,
+        });
+      }
+      await batch.commit();
     }
-    await batch.commit();
 
     // Mensaje y volver atrás
     if (!mounted) return;
@@ -242,6 +262,40 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
                           _selectedDate = pickedDate;
                         });
                       }
+                    },
+                  ),
+                  const SizedBox(height: 20),
+                  
+                  CheckboxListTile(
+                    title: const Text('¿Es un gasto periódico?'),
+                    value: _esPeriodico,
+                    onChanged: (value) {
+                      setState(() {
+                        _esPeriodico = value!;
+                        if (!_esPeriodico) _frecuenciaSeleccionada = null;
+                      });
+                    },
+                  ),
+                  if (_esPeriodico)
+                  DropdownButtonFormField<String>(
+                    value: _frecuenciaSeleccionada,
+                    decoration: const InputDecoration(
+                      labelText: 'Frecuencia',
+                      border: OutlineInputBorder(),
+                    ),
+                    items: _frecuencias
+                        .map((f) => DropdownMenuItem(value: f, child: Text(f)))
+                        .toList(),
+                    onChanged: (val) {
+                      setState(() {
+                        _frecuenciaSeleccionada = val;
+                      });
+                    },
+                    validator: (val) {
+                      if (_esPeriodico && val == null) {
+                        return 'Selecciona una frecuencia';
+                      }
+                      return null;
                     },
                   ),
                   TextFormField(

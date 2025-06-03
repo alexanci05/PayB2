@@ -4,6 +4,8 @@ import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter_speed_dial/flutter_speed_dial.dart';  // Biblioteca para el botón flotante con múltiples opciones
 import 'package:payb2/screens/grupo_detalles/grupo_detalle_screen.dart';
 import 'package:payb2/notifications.dart';
+import 'package:provider/provider.dart';
+import 'package:payb2/providers/theme_provider.dart';
 
 // Pantalla principal cuando se pertenece a un grupo
 
@@ -386,8 +388,13 @@ class SettingsScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const Center(
-      child: Text('Pantalla Ajustes - en construcción'),
+    return Center(
+      child: ElevatedButton(
+        onPressed: () {
+          Provider.of<ThemeProvider>(context, listen: false).toggleTheme();
+        },
+        child: const Text('Cambiar tema'),
+      ),
     );
   }
 }
