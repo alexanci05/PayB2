@@ -1,1 +1,35 @@
-{"flutter":{"platforms":{"android":{"default":{"projectId":"payb2-5e89e","appId":"1:785509693993:android:71e997f36777dde285ba38","fileOutput":"android/app/google-services.json"}},"dart":{"lib/firebase_options.dart":{"projectId":"payb2-5e89e","configurations":{"android":"1:785509693993:android:71e997f36777dde285ba38","ios":"1:785509693993:ios:2d14f0598d5d205a85ba38"}}}}}}
+{
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "payb2-5e89e",
+          "appId": "1:785509693993:android:71e997f36777dde285ba38",
+          "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "payb2-5e89e",
+          "configurations": {
+            "android": "1:785509693993:android:71e997f36777dde285ba38",
+            "ios": "1:785509693993:ios:2d14f0598d5d205a85ba38"
+          }
+        }
+      }
+    }
+  },
+  "functions": [
+    {
+      "source": "functions",
+      "codebase": "default",
+      "ignore": [
+        "node_modules",
+        ".git",
+        "firebase-debug.log",
+        "firebase-debug.*.log",
+        "*.local"
+      ]
+    }
+  ]
+}
