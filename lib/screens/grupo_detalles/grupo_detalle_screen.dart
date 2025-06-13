@@ -2,40 +2,43 @@ import 'package:flutter/material.dart';
 import 'package:payb2/screens/crear_gasto/crear_gasto.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
+import 'package:firebase_auth/firebase_auth.dart'; // << Import Firebase Auth
 
 class GrupoDetalleScreen extends StatefulWidget {
   final String groupId;
   final String groupName;
-  final String currentDeviceId;
+  // Ya no se recibe currentDeviceId aquí
 
   const GrupoDetalleScreen({
     super.key,
     required this.groupId,
     required this.groupName,
-    required this.currentDeviceId,
   });
 
   @override
   State<GrupoDetalleScreen> createState() => _GrupoDetalleScreenState();
 }
 
-
 class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
   String? _myMemberId;
-  List<Map<String,String>> _members = [];
+  List<Map<String, String>> _members = [];
   late Future<Map<String, dynamic>> _miembroYMapa;
+
+  // Guarda el uid del usuario
+  late final String _uid;
 
   @override
   void initState() {
     super.initState();
+    _uid = FirebaseAuth.instance.currentUser!.uid; // obtenemos el uid aquí
+
     _miembroYMapa = _obtenerMiembroYMapa();
-    // esperamos a que termine el primer frame
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _checkOrAskMember();
     });
   }
 
-   Future<Map<String, dynamic>> _obtenerMiembroYMapa() async {
+  Future<Map<String, dynamic>> _obtenerMiembroYMapa() async {
     final snap = await FirebaseFirestore.instance
         .collection('groups')
         .doc(widget.groupId)
@@ -44,12 +47,12 @@ class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
 
     final members = snap.docs;
 
-    // Mapa ID → nombre
     final memberMap = {
-      for (var m in members) m.id: {
-        'name': m['name'],
-        'reclamadoPor': m['reclamadoPor'],
-      }
+      for (var m in members)
+        m.id: {
+          'name': m['name'],
+          'reclamadoPor': m['reclamadoPor'],
+        }
     };
 
     return {
@@ -60,60 +63,53 @@ class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
   Future<void> _checkOrAskMember() async {
     final db = FirebaseFirestore.instance;
 
-    // 1) ¿Ya reclamado? 
-    final snapReclamado = await FirebaseFirestore.instance
-    .collection('groups')
-    .doc(widget.groupId)
-    .collection('members')
-    .where('reclamadoPor', isEqualTo: widget.currentDeviceId)
-    .limit(1)
-    .get();
+    // 1) ¿Ya reclamado?
+    final snapReclamado = await db
+        .collection('groups')
+        .doc(widget.groupId)
+        .collection('members')
+        .where('reclamadoPor', isEqualTo: _uid) // aquí usamos _uid
+        .limit(1)
+        .get();
 
     if (snapReclamado.docs.isNotEmpty) {
-      // Ya hay un miembro al que he reclamado
       _myMemberId = snapReclamado.docs.first.id;
       setState(() {});
       return;
     }
 
-
     // 2) Carga miembros fantasma libres
     final snap = await db
-      .collection('groups')
-      .doc(widget.groupId)
-      .collection('members')
-      .where('reclamadoPor', isNull: true)
-      .get();
+        .collection('groups')
+        .doc(widget.groupId)
+        .collection('members')
+        .where('reclamadoPor', isNull: true)
+        .get();
 
-    _members = snap.docs.map((d) => {
-      'id': d.id,
-      'name': d['name'] as String,
-    }).toList();
+    _members = snap.docs
+        .map((d) => {
+              'id': d.id,
+              'name': d['name'] as String,
+            })
+        .toList();
 
+    if (_members.isEmpty) return;
 
+    if (!mounted) return;
 
-    if (_members.isEmpty) return; // nada que reclamar
-
-    if (!mounted) return; 
-
-    // 3) Abrir diálogo
     final chosen = await showDialog<String>(
       context: context,
       barrierDismissible: false,
       builder: (ctx) => SimpleDialog(
         title: const Text('¿Quién eres en este grupo?'),
         children: [
-          // Opción para cada miembro
           for (var m in _members)
             SimpleDialogOption(
               onPressed: () {
-                // ¡Usa el ctx aquí, no el contexto externo!
                 Navigator.pop(ctx, m['id']);
               },
               child: Text(m['name']!),
             ),
-
-          // Opción Cancelar
           SimpleDialogOption(
             onPressed: () {
               Navigator.pop(ctx, null);
@@ -124,16 +120,14 @@ class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
       ),
     );
 
-    if (chosen == null) return; // si canceló
+    if (chosen == null) return;
 
-    // 4) Marcar phantom como reclamado
-    await FirebaseFirestore.instance
-      .collection('groups')
-      .doc(widget.groupId)
-      .collection('members')
-      .doc(chosen)
-      .update({ 'reclamadoPor': widget.currentDeviceId });
-
+    await db
+        .collection('groups')
+        .doc(widget.groupId)
+        .collection('members')
+        .doc(chosen)
+        .update({'reclamadoPor': _uid}); // aquí también _uid
 
     setState(() => _myMemberId = chosen);
   }
@@ -144,13 +138,13 @@ class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
       MaterialPageRoute(
         builder: (context) => CrearGastoScreen(
           groupId: widget.groupId,
-          currentdeviceId: widget.currentDeviceId,
+          uid: _uid, // Pasamos el uid aquí, no currentDeviceId
         ),
       ),
     );
   }
 
- @override
+  @override
   Widget build(BuildContext context) {
     return FutureBuilder<Map<String, dynamic>>(
       future: _miembroYMapa,
@@ -161,7 +155,8 @@ class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
           );
         }
 
-        final memberMap = snapshot.data!['memberMap'] as Map<String, Map<String, dynamic>>;
+        final memberMap =
+            snapshot.data!['memberMap'] as Map<String, Map<String, dynamic>>;
 
         return DefaultTabController(
           length: 3,
@@ -193,7 +188,7 @@ class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
                     ),
                     SaldosView(
                       groupId: widget.groupId,
-                      currentDeviceId: widget.currentDeviceId,
+                      currentDeviceId: _uid, // pasamos uid aquí
                       memberMap: memberMap,
                       myMemberId: _myMemberId,
                     ),
@@ -211,7 +206,6 @@ class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
       },
     );
   }
-
 }
 
 // Pantalla de Gastos ------------------------------------------

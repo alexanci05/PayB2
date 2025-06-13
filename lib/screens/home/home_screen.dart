@@ -1,27 +1,28 @@
 import 'package:flutter/material.dart';
+import 'package:payb2/controladores/registrar_usuario.dart';
 
-
-// Pantalla principal cuando no se pertenece a ningún grupo
-
-class HomeScreen extends StatelessWidget {
+class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  @override
+  void initState() {
+    super.initState();
+
+    // Registrar usuario para notificaciones al entrar por primera vez
+    registerUserForNotifications();
+  }
+
   void _onCrearGrupo(BuildContext context) {
-    // Aquí luego navegarás a CrearGrupoScreen
     Navigator.pushNamed(context, '/crearGrupo');
-    /*
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Navegar a Crear Grupo')),
-    );
-    */
   }
 
   void _onUnirseGrupo(BuildContext context) {
-    // Aquí luego navegarás a UnirseGrupoScreen
-    // Navigator.pushNamed(context, '/unirseGrupo');
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Navegar a Unirse a Grupo')),
-    );
+    Navigator.pushNamed(context, '/unirseGrupo');
   }
 
   @override

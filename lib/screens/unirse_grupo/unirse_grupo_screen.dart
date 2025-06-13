@@ -3,6 +3,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'dart:io';
 import 'package:payb2/screens/home/main_screen.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
 class UnirseGrupoScreen extends StatefulWidget {
   const UnirseGrupoScreen({super.key});
@@ -28,7 +29,14 @@ class UnirseGrupoScreenState extends State<UnirseGrupoScreen> {
 
     try{
       // 1. Obtener el deviceId
-      final deviceId = await _getDeviceId();
+      final uid = FirebaseAuth.instance.currentUser?.uid;
+      if (uid == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Error: Usuario no autenticado')),
+        );
+        return;
+      }
+
 
       // 2. Verificar si el grupo con el código existe
       final groupQuery = await FirebaseFirestore.instance
@@ -51,7 +59,7 @@ class UnirseGrupoScreenState extends State<UnirseGrupoScreen> {
       // 3. Verificar si el dispositivo ya es miembro del grupo
       final memberQuery = await FirebaseFirestore.instance
           .collection('groupMembers')
-          .where('deviceId', isEqualTo: deviceId)
+          .where('deviceId', isEqualTo: uid)
           .where('groupId', isEqualTo: groupId)
           .get();
 
@@ -67,11 +75,11 @@ class UnirseGrupoScreenState extends State<UnirseGrupoScreen> {
       // 4. Crear el groupMember
       final memberRef = FirebaseFirestore.instance
           .collection('groupMembers')
-          .doc('${groupId}_$deviceId');
+          .doc('${groupId}_$uid');
 
       await memberRef.set({
         'groupId': groupId,
-        'deviceId': deviceId,
+        'deviceId': uid,
         'joinedAt': FieldValue.serverTimestamp(),
       });
 
@@ -146,18 +154,5 @@ class UnirseGrupoScreenState extends State<UnirseGrupoScreen> {
         ),
       ),
     );
-  }
-}
-
-Future<String> _getDeviceId() async {
-  final deviceInfo = DeviceInfoPlugin();
-  if (Platform.isAndroid) {
-    final androidInfo = await deviceInfo.androidInfo;
-    return androidInfo.id; // o .androidId si prefieres
-  } else if (Platform.isIOS) {
-    final iosInfo = await deviceInfo.iosInfo;
-    return iosInfo.identifierForVendor ?? 'unknown_ios';
-  } else {
-    return 'unknown_device';
   }
 }

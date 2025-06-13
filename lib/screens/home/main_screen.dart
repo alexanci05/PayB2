@@ -6,6 +6,9 @@ import 'package:payb2/screens/grupo_detalles/grupo_detalle_screen.dart';
 import 'package:payb2/notifications.dart';
 import 'package:provider/provider.dart';
 import 'package:payb2/providers/theme_provider.dart';
+import 'package:collection/collection.dart'; // para firstWhereOrNull
+import 'package:cloud_functions/cloud_functions.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
 // Pantalla principal cuando se pertenece a un grupo
 
@@ -32,12 +35,12 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   void _onCrearGrupo(BuildContext context) {
-    // Aquí luego navegarás a CrearGrupoScreen
+    
     Navigator.pushNamed(context, '/crearGrupo');
   }
 
   void _onUnirseAGrupo(BuildContext context) {
-    // Aquí luego navegarás a UnirseGrupoScreen
+    
     Navigator.pushNamed(context, '/unirseGrupo');
   }
 
@@ -112,9 +115,8 @@ class _GroupsScreenState extends State<GroupsScreen> {
   }
 
   Future<void> loadGroups() async {
-    final info = DeviceInfoPlugin();
-    final android = await info.androidInfo;
-    final id = android.id;
+    final id = await getUid();
+
 
     final memberQuery = await FirebaseFirestore.instance
         .collection('groupMembers')
@@ -170,7 +172,6 @@ class _GroupsScreenState extends State<GroupsScreen> {
                       builder: (_) => GrupoDetalleScreen(
                         groupId: docs[i].id,
                         groupName: data['name'] ?? 'Sin nombre',
-                        currentDeviceId: deviceId!,
                       ),
                     ),
                   );
@@ -202,18 +203,22 @@ class _WalletScreenState extends State<WalletScreen> {
     _futureDebts = _loadDebts();
   }
 
-  Future<String> _loadDeviceId() async {
-    final id = await getDeviceId();
+  
+  final functions = FirebaseFunctions.instance;
+
+  Future<String> _loadUid() async {
+    final id = await getUid();
     return id;
   }
 
-  Future<List<_DebtItem>> _loadDebts() async {
-    final deviceId = await _loadDeviceId();
 
-    // 1) Obtén todos los groupIds donde estés
+  Future<List<_DebtItem>> _loadDebts() async {
+    final uid = await _loadUid();
+
+    // 1) Obtenemos todos los groupIds donde este
     final memberQ = await FirebaseFirestore.instance
         .collection('groupMembers')
-        .where('deviceId', isEqualTo: deviceId)
+        .where('deviceId', isEqualTo: uid)
         .get();
     final groupIds = memberQ.docs.map((d) => d['groupId'] as String).toList();
 
@@ -226,7 +231,7 @@ class _WalletScreenState extends State<WalletScreen> {
           .collection('groups').doc(gid).get();
       final groupName = groupDoc['name'] as String? ?? 'Grupo';
 
-      // b) Carga todos los miembros de ese grupo y crea memberMap
+      // b) Cargamos todos los miembros de ese grupo y creamos memberMap
       final membersSnap = await FirebaseFirestore.instance
           .collection('groups').doc(gid)
           .collection('members')
@@ -236,11 +241,15 @@ class _WalletScreenState extends State<WalletScreen> {
           m.id: (m.data()['name'] as String? ?? '—'),
       };
 
-      // c) Encuentra tu phantom memberId en ese grupo
-      final phantomSnap = membersSnap.docs.firstWhere(
-        (m) => (m.data()['reclamadoPor'] as String?) == deviceId,
-        orElse: () => throw StateError('No phantom en $gid'),
+       // c) Intentamos encontrar el usuario fantasma
+      final phantomSnap = membersSnap.docs.firstWhereOrNull(
+        (m) => (m.data()['reclamadoPor'] as String?) == uid,
       );
+
+      if (phantomSnap == null) {
+        continue;
+      }
+      
       final phantomId = phantomSnap.id;
 
       // d) Recorre todos los gastos
@@ -319,34 +328,25 @@ class _WalletScreenState extends State<WalletScreen> {
                   children: [
                     ElevatedButton(
                       onPressed: () async {
-                        // Marcar como pagado: elimina o actualiza el split
+                        // Actualizar splits a pagado
                         await FirebaseFirestore.instance
-                            .collection('groups').doc(d.groupId)
-                            .collection('gastos').doc(d.gastoId)
-                            .collection('divisiones').where('memberId', isEqualTo: d.myPhantomId)
-                            .get()
-                            .then((snap) {
-                          for (var doc in snap.docs) {
-                            doc.reference.update({'cantidad': 0, 'pagado': true});
-                          }
-                        });
+                          .collection('groups').doc(d.groupId)
+                          .collection('gastos').doc(d.gastoId)
+                          .collection('divisiones').where('memberId', isEqualTo: d.myPhantomId)
+                          .get()
+                          .then((snap) {
+                            for (var doc in snap.docs) {
+                              doc.reference.update({'cantidad': 0, 'pagado': true});
+                            }
+                          });
+
                         // Refrescar lista
                         setState(() {
                           _futureDebts = _loadDebts();
                         });
                       },
                       child: const Text('Marcar pagado'),
-                    ),
-                    const SizedBox(width: 8), // espacio entre botones
-                    ElevatedButton(
-                      onPressed: () {
-                        mostrarNotificacion(
-                          titulo: d.gastoName,
-                          cuerpo: d.amount.toString(),  // convertir a String
-                        );
-                      },
-                      child: const Text('Mostrar noti'),
-                    ),
+                    )
                   ],
                 ),
               ),
@@ -398,8 +398,11 @@ class SettingsScreen extends StatelessWidget {
   }
 }
 
-Future<String> getDeviceId() async {
-  final deviceInfo = DeviceInfoPlugin();
-  final androidInfo = await deviceInfo.androidInfo;
-  return androidInfo.id; // Este es único por instalación
+
+Future<String> getUid() async {
+  final user = FirebaseAuth.instance.currentUser;
+  if (user == null) {
+    throw Exception('Usuario no autenticado');
+  }
+  return user.uid;
 }

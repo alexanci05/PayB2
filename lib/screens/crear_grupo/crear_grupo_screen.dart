@@ -4,6 +4,8 @@ import 'package:device_info_plus/device_info_plus.dart';
 import 'dart:io';
 import 'package:payb2/screens/home/main_screen.dart';
 import 'dart:math';
+import 'package:firebase_auth/firebase_auth.dart';
+
 
 class CrearGrupoScreen extends StatefulWidget {
   const CrearGrupoScreen({super.key});
@@ -45,7 +47,11 @@ class CrearGrupoScreenState extends State<CrearGrupoScreen> {
     final nombre = _nombreController.text.trim();
 
     try {
-      final deviceId = await _getDeviceId();
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        throw Exception('Usuario no autenticado');
+      }
+      final uid = user.uid;
       final groupRef = FirebaseFirestore.instance.collection('groups').doc();
       final groupId = groupRef.id;
       final groupCode = await _generateUniqueGroupCode();
@@ -55,17 +61,17 @@ class CrearGrupoScreenState extends State<CrearGrupoScreen> {
         'name': nombre,
         'createdAt': FieldValue.serverTimestamp(),
         'groupCode': groupCode,
-        'ownerDeviceId': deviceId,
+        'ownerDeviceId': uid,
       });
 
       // 2. Añadir miembro creador a groupMembers
       final memberRef = FirebaseFirestore.instance
           .collection('groupMembers')
-          .doc('${groupId}_$deviceId');
+          .doc('${groupId}_$uid');
 
       await memberRef.set({
         'groupId': groupId,
-        'deviceId': deviceId,
+        'deviceId': uid,
         'joinedAt': FieldValue.serverTimestamp(),
       });
 
@@ -180,19 +186,6 @@ class CrearGrupoScreenState extends State<CrearGrupoScreen> {
 }
 
 
-
-Future<String> _getDeviceId() async {
-  final deviceInfo = DeviceInfoPlugin();
-  if (Platform.isAndroid) {
-    final androidInfo = await deviceInfo.androidInfo;
-    return androidInfo.id; // o .androidId si prefieres
-  } else if (Platform.isIOS) {
-    final iosInfo = await deviceInfo.iosInfo;
-    return iosInfo.identifierForVendor ?? 'unknown_ios';
-  } else {
-    return 'unknown_device';
-  }
-}
 
 Future<String> _generateUniqueGroupCode() async {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';

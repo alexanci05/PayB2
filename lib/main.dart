@@ -5,8 +5,9 @@ import 'firebase_options.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 
-void main() async{
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   await Firebase.initializeApp(
@@ -15,24 +16,27 @@ void main() async{
 
   await signAnonymus();
 
-  await initNotifications();
+  await initNotifications(); // Inicializa y pide permisos para notificaciones locales
+
+  await FirebaseMessaging.instance.requestPermission(); // Pide permisos para notificaciones remotas
 
   runApp(MyApp());
 }
 
-
-// Necesitamos algún tipo de identificación para la base de datos
-Future<void> signAnonymus() async{
+// Para login anónimo
+Future<void> signAnonymus() async {
   final auth = FirebaseAuth.instance;
 
-  if (auth.currentUser == null){
+  if (auth.currentUser == null) {
     await auth.signInAnonymously();
   }
 }
 
-// Configuramos el paquete de notificaciones en la app
-final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
+// Plugin de notificaciones locales (global)
+final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
+    FlutterLocalNotificationsPlugin();
 
+// Inicializa notificaciones locales
 Future<void> initNotifications() async {
   const AndroidInitializationSettings androidSettings =
       AndroidInitializationSettings('@mipmap/ic_launcher');
@@ -53,15 +57,13 @@ Future<void> initNotifications() async {
   await _requestNotificationPermission();
 }
 
+// Pide permisos para notificaciones (Android 13+ y iOS)
 Future<void> _requestNotificationPermission() async {
-  // Android 13+ usa permission_handler
   if (await Permission.notification.isDenied ||
       await Permission.notification.isPermanentlyDenied) {
     await Permission.notification.request();
-
   }
 
-  // iOS también puede pedir permisos explícitamente
   await flutterLocalNotificationsPlugin
       .resolvePlatformSpecificImplementation<IOSFlutterLocalNotificationsPlugin>()
       ?.requestPermissions(
