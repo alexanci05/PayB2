@@ -1,7 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:device_info_plus/device_info_plus.dart';
-import 'dart:io';
 import 'package:payb2/screens/home/main_screen.dart';
 import 'dart:math';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -188,14 +186,12 @@ class CrearGrupoScreenState extends State<CrearGrupoScreen> {
 
 
 Future<String> _generateUniqueGroupCode() async {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
   final rand = Random();
 
   String randomString() => String.fromCharCodes(
-        List.generate(6, (_) => chars.codeUnitAt(rand.nextInt(chars.length))),
+        List.generate(8, (_) => chars.codeUnitAt(rand.nextInt(chars.length))),
       );
-
- 
 
   String code;
   bool exists = true;

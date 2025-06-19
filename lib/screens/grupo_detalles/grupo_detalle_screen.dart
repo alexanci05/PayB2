@@ -3,6 +3,7 @@ import 'package:payb2/screens/crear_gasto/crear_gasto.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
 import 'package:firebase_auth/firebase_auth.dart'; // << Import Firebase Auth
+import 'package:fl_chart/fl_chart.dart';
 
 class GrupoDetalleScreen extends StatefulWidget {
   final String groupId;
@@ -188,11 +189,12 @@ class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
                     ),
                     SaldosView(
                       groupId: widget.groupId,
-                      currentDeviceId: _uid, // pasamos uid aquí
                       memberMap: memberMap,
                       myMemberId: _myMemberId,
                     ),
-                    const EstadisticasView(),
+                    EstadisticasView(
+                      groupId: widget.groupId,
+                    ),
                   ]),
                 ),
               ],
@@ -326,39 +328,92 @@ class _GastosViewState extends State<GastosView> {
 
 
 
-class SaldosView extends StatelessWidget {
+class SaldosView extends StatefulWidget {
   final String groupId;
-  final String currentDeviceId;
-  final Map<String, Map<String, dynamic>> memberMap;
   final String? myMemberId;
+  final Map<String, Map<String, dynamic>> memberMap;
 
   const SaldosView({
     super.key,
     required this.groupId,
-    required this.currentDeviceId,
     required this.memberMap,
     this.myMemberId,
   });
 
   @override
+  State<SaldosView> createState() => _SaldosViewState();
+}
+
+class _SaldosViewState extends State<SaldosView> {
+  late Future<List<QueryDocumentSnapshot<Map<String, dynamic>>>> _futureDivisiones;
+
+  @override
+  void initState() {
+    super.initState();
+    _futureDivisiones = _loadDivisiones();
+  }
+
+  Future<List<QueryDocumentSnapshot<Map<String, dynamic>>>> _loadDivisiones() async {
+    final gastosSnap = await FirebaseFirestore.instance
+        .collection('groups')
+        .doc(widget.groupId)
+        .collection('gastos')
+        .get();
+
+    final List<QueryDocumentSnapshot<Map<String, dynamic>>> divisiones = [];
+
+    for (final gastoDoc in gastosSnap.docs) {
+      final divisionesSnap = await gastoDoc.reference
+          .collection('divisiones')
+          .where('cantidad', isGreaterThan: 0)
+          .get();
+
+      divisiones.addAll(divisionesSnap.docs);
+    }
+
+    return divisiones;
+  }
+
+  Future<void> _marcarPagado(String gastoId, String divisionId) async {
+    await FirebaseFirestore.instance
+        .collection('groups')
+        .doc(widget.groupId)
+        .collection('gastos')
+        .doc(gastoId)
+        .collection('divisiones')
+        .doc(divisionId)
+        .update({
+      'cantidad': 0,
+      'pagado': true,
+    });
+
+    // Refrescar pantalla
+    setState(() {
+      _futureDivisiones = _loadDivisiones();
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return StreamBuilder<QuerySnapshot>(
-      stream: FirebaseFirestore.instance
-          .collectionGroup('divisiones')
-          .where('groupId', isEqualTo: groupId)
-          .snapshots(),
+    return FutureBuilder<List<QueryDocumentSnapshot<Map<String, dynamic>>>>(
+      future: _futureDivisiones,
       builder: (context, snap) {
-        if (snap.hasError) return Center(child: Text('Error: ${snap.error}'));
         if (snap.connectionState == ConnectionState.waiting) {
           return const Center(child: CircularProgressIndicator());
         }
+        if (snap.hasError) {
+          return Center(child: Text('Error: ${snap.error}'));
+        }
 
-        final divisiones = snap.data!.docs;
+        final divisiones = snap.data!;
+        if (divisiones.isEmpty) {
+          return const Center(child: Text('No tienes deudas pendientes.'));
+        }
 
-        // 1) Agrupa y suma los splits por memberId
+        // Agrupar sumas por miembro
         final totals = <String, double>{};
-        for (var doc in divisiones) {
-          final data = doc.data()! as Map<String, dynamic>;
+        for (var d in divisiones) {
+          final data = d.data();
           final memberId = data['memberId'] as String;
           final amount = (data['cantidad'] as num).toDouble();
           totals[memberId] = (totals[memberId] ?? 0) + amount;
@@ -366,13 +421,13 @@ class SaldosView extends StatelessWidget {
 
         return ListView.builder(
           padding: const EdgeInsets.all(16),
-          itemCount: memberMap.length,
+          itemCount: widget.memberMap.length,
           itemBuilder: (context, i) {
-            final memberIds = memberMap.keys.toList();
+            final memberIds = widget.memberMap.keys.toList();
             final memberId = memberIds[i];
-            final name = memberMap[memberId]?['name'] ?? 'Sin nombre';
+            final name = widget.memberMap[memberId]?['name'] ?? 'Sin nombre';
             final balance = totals[memberId] ?? 0.0;
-            final isMe = memberId == myMemberId;
+            final isMe = memberId == widget.myMemberId;
 
             return Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -395,22 +450,33 @@ class SaldosView extends StatelessWidget {
                 ),
                 if (isMe && balance > 0)
                   ...divisiones.where((d) {
-                    final data = d.data()! as Map<String, dynamic>;
-                    return data['memberId'] == myMemberId;
+                    final data = d.data();
+                    return data['memberId'] == widget.myMemberId;
                   }).map((d) {
-                    final data = d.data()! as Map<String, dynamic>;
+                    final data = d.data();
                     final cantidad = (data['cantidad'] as num).toDouble();
                     final gastoNombre = data['nombre'] ?? 'Gasto';
                     final pagadoPor = data['pagadoPor'] ?? '';
-                    final nombrePagador = memberMap[pagadoPor]?['name'] ?? 'Otro';
+                    final nombrePagador = widget.memberMap[pagadoPor]?['name'] ?? 'Otro';
+                    final gastoId = d.reference.parent.parent!.id;
+                    final divisionId = d.id;
 
-                    return ListTile(
-                      title: Text(gastoNombre),
-                      subtitle: Text('Debes a $nombrePagador'),
-                      trailing: Text('${cantidad.toStringAsFixed(2)} €'),
-                      onTap: () {
-                        // Aquí un diálogo para cambiar estado de la deuda
-                      },
+                    return Card(
+                      margin: const EdgeInsets.symmetric(vertical: 6),
+                      child: ListTile(
+                        title: Text(gastoNombre),
+                        subtitle: Text('Debes ${cantidad.toStringAsFixed(2)}€ a $nombrePagador'),
+                        trailing: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            ElevatedButton(
+                              onPressed: () => _marcarPagado(gastoId, divisionId),
+                              child: const Text('Pagado'),
+                            ),
+                          ],
+                        ),
+                      ),
                     );
                   }),
               ],
@@ -424,15 +490,170 @@ class SaldosView extends StatelessWidget {
 
 
 
-class EstadisticasView extends StatelessWidget {
-  const EstadisticasView({super.key});
+class EstadisticasView extends StatefulWidget {
+  final String groupId;
+
+  const EstadisticasView({super.key, required this.groupId});
+
+  @override
+  State<EstadisticasView> createState() => _EstadisticasViewState();
+}
+
+class _EstadisticasViewState extends State<EstadisticasView> {
+  late Future<List<_GastoEntry>> _futureGastos;
+
+  @override
+  void initState() {
+    super.initState();
+    _futureGastos = _loadGastos();
+  }
+
+  Future<List<_GastoEntry>> _loadGastos() async {
+    final gastosSnap = await FirebaseFirestore.instance
+        .collection('groups')
+        .doc(widget.groupId)
+        .collection('gastos')
+        .get();
+
+    final List<_GastoEntry> entries = [];
+
+    for (final doc in gastosSnap.docs) {
+      final data = doc.data();
+      final nombre = data['nombre'] as String? ?? 'Gasto';
+      final importe = (data['cantidad'] as num?)?.toDouble() ?? 0.0;
+
+      if (importe > 0) {
+        entries.add(_GastoEntry(nombre, importe));
+      }
+    }
+
+    return entries;
+  }
 
   @override
   Widget build(BuildContext context) {
-    return Center(
-      child: Text('Estadísticas del grupo'), 
+    return FutureBuilder<List<_GastoEntry>>(
+      future: _futureGastos,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        if (snapshot.hasError) {
+          return Center(child: Text('Error: ${snapshot.error}'));
+        }
+
+        final gastos = snapshot.data!;
+        final total = gastos.fold(0.0, (sum, e) => sum + e.importe);
+
+        if (gastos.isEmpty || total == 0) {
+          return const Center(child: Text('No hay datos para mostrar.'));
+        }
+
+        return Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Column(
+            children: [
+              const Text(
+                'Distribución de Gastos',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 20),
+              AspectRatio(
+                aspectRatio: 1.3,
+                child: Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    PieChart(
+                      PieChartData(
+                        sectionsSpace: 4,
+                        centerSpaceRadius: 60,
+                        sections: gastos.map((e) {
+                          final porcentaje = (e.importe / total) * 100;
+                          return PieChartSectionData(
+                            value: e.importe,
+                            title: '${porcentaje.toStringAsFixed(1)}%',
+                            color: _getColorForGasto(e.nombre),
+                            radius: 100,
+                            titleStyle: const TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white,
+                            ),
+                          );
+                        }).toList(),
+                      ),
+                    ),
+                    // Total en el centro
+                    Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Text(
+                          'Total',
+                          style: TextStyle(fontSize: 14, color: Colors.grey),
+                        ),
+                        Text(
+                          '€${total.toStringAsFixed(2)}',
+                          style: const TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    )
+                  ],
+                ),
+              ),
+              const SizedBox(height: 20),
+              Expanded(
+                child: ListView.builder(
+                  itemCount: gastos.length,
+                  itemBuilder: (context, i) {
+                    final gasto = gastos[i];
+                    final porcentaje = (gasto.importe / total) * 100;
+
+                    return ListTile(
+                      leading: CircleAvatar(
+                        backgroundColor: _getColorForGasto(gasto.nombre),
+                      ),
+                      title: Text(gasto.nombre),
+                      trailing: Text(
+                        '${porcentaje.toStringAsFixed(1)}%  (€${gasto.importe.toStringAsFixed(2)})',
+                        style: const TextStyle(fontSize: 16),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
+}
+
+class _GastoEntry {
+  final String nombre;
+  final double importe;
+
+  _GastoEntry(this.nombre, this.importe);
+}
+
+Color _getColorForGasto(String nombre) {
+  final colors = [
+    Colors.blue,
+    Colors.red,
+    Colors.green,
+    Colors.orange,
+    Colors.purple,
+    Colors.cyan,
+    Colors.teal,
+    Colors.brown,
+    Colors.pink,
+    Colors.amber,
+  ];
+  final index = nombre.hashCode % colors.length;
+  return colors[index];
 }
 
 Future<void> deleteGastoConSplits({

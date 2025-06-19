@@ -11,7 +11,6 @@ Future<void> registerUserForNotifications() async {
 
   final user = FirebaseAuth.instance.currentUser;
   if (user == null) {
-    print("Usuario no autenticado.");
     return;
   }
 
@@ -19,7 +18,6 @@ Future<void> registerUserForNotifications() async {
   final token = await FirebaseMessaging.instance.getToken();
 
   if (token == null) {
-    print("Token de FCM no disponible.");
     return;
   }
 
@@ -33,5 +31,4 @@ Future<void> registerUserForNotifications() async {
   });
 
   await prefs.setBool('userRegistered', true);
-  print("Usuario registrado correctamente con token de notificación.");
 }
