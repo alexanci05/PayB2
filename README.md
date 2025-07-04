@@ -56,7 +56,6 @@ El rendimiento se ha evaluado mediante:
 
 - Flutter DevTools: análisis de uso de CPU, jank, renderizado de frames, etc.
 - Xcode Instruments: control de uso de CPU y análisis con Time Profiler en iOS.
-- Pruebas manuales de volumen: simulación de creación masiva de grupos, usuarios y gastos para verificar estabilidad del backend en Firebase.
 
 ---
 
