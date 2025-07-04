@@ -63,16 +63,16 @@ El rendimiento se ha evaluado mediante:
 ## 📷 Capturas de pantalla
 
 ### 🏠 Primera pantalla
-![Home](assets/screenshots/Home.png)
+![Home](assets/screenshots/Home.jpeg)
 
 ### 👥 Vista grupos
-![Vista grupos](assets/screenshots/Grupos.png)
+![Vista grupos](assets/screenshots/Grupos.jpeg)
 
 ### 💳 Cartera
-![Cartera](assets/screenshots/Cartera.png)
+![Cartera](assets/screenshots/Cartera.jpeg)
 
 ### 📈 Estadisticas
-![Estadisticas](assets/screenshots/Estadisticas.png)
+![Estadisticas](assets/screenshots/Estadisticas.jpeg)
 
 ---
 
