@@ -30,13 +30,13 @@ Desarrollado por **Alexander Caiza** como Trabajo de Fin de Grado en Ingeniería
 
 1. **Clona el repositorio:**
 
-```bash
+``bash
 git clone https://github.com/alexanci05/payb2.git
 cd payb2
 
 2. **Instala dependencias:**
 
-```bash
+``bash
 flutter pub get
 
 3. **Instala dependencias:**
@@ -45,7 +45,7 @@ Asegúrate de haber añadido los archivos google-services.json (Android) y Googl
 
 4. **Ejecuta en modo debug o profile:**
 
-```bash
+``bash
 flutter run
 
 ---
