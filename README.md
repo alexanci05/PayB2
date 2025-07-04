@@ -50,7 +50,7 @@ flutter run
 
 ---
 
-## 📦 Pruebas de rendimiento
+## 🧪 Pruebas y rendimiento
 
 El rendimiento se ha evaluado mediante:
 
