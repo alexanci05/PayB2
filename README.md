@@ -50,7 +50,7 @@ flutter run
 
 ---
 
-## 📦 Instalación del proyecto
+## 📦 Pruebas de rendimiento
 
 El rendimiento se ha evaluado mediante:
 
