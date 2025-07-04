@@ -14,18 +14,30 @@ class UnirseGrupoScreenState extends State<UnirseGrupoScreen> {
   final _formKey = GlobalKey<FormState>();
   final TextEditingController _codigoController = TextEditingController();
 
- @override
+  int failedAttempts = 0;
+  DateTime? lockUntil;
+
+  @override
   void dispose() {
     _codigoController.dispose();
     super.dispose();
   }
 
-  Future<void> _onSubmit() async{
+  Future<void> _onSubmit() async {
+    // Verificar si está bloqueado
+    if (lockUntil != null && DateTime.now().isBefore(lockUntil!)) {
+      final remaining = lockUntil!.difference(DateTime.now()).inSeconds;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Demasiados intentos fallidos. Intenta de nuevo en $remaining segundos.')),
+      );
+      return;
+    }
+
     if (!_formKey.currentState!.validate()) return;
 
     final codigoGrupo = _codigoController.text.trim();
 
-    try{
+    try {
       // 1. Obtener el deviceId
       final uid = FirebaseAuth.instance.currentUser?.uid;
       if (uid == null) {
@@ -34,7 +46,6 @@ class UnirseGrupoScreenState extends State<UnirseGrupoScreen> {
         );
         return;
       }
-
 
       // 2. Verificar si el grupo con el código existe
       final groupQuery = await FirebaseFirestore.instance
@@ -45,13 +56,27 @@ class UnirseGrupoScreenState extends State<UnirseGrupoScreen> {
       if (!mounted) return;
 
       if (groupQuery.docs.isEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('El código de grupo no pertenece a ningún grupo o no es válido')),
-        );
+        failedAttempts += 1;
+
+        if (failedAttempts >= 3) {
+          lockUntil = DateTime.now().add(const Duration(seconds: 30));
+          failedAttempts = 0; // opcional: reiniciar para el próximo ciclo
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Demasiados intentos fallidos. Bloqueado por 30 segundos.')),
+          );
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Código inválido. Intento fallido $failedAttempts de 3')),
+          );
+        }
         return;
       }
 
-      final doc     = groupQuery.docs.first;
+      // Si el código es correcto, reiniciar contador
+      failedAttempts = 0;
+      lockUntil = null;
+
+      final doc = groupQuery.docs.first;
       final groupId = doc.id;
 
       // 3. Verificar si el dispositivo ya es miembro del grupo
@@ -81,22 +106,12 @@ class UnirseGrupoScreenState extends State<UnirseGrupoScreen> {
         'joinedAt': FieldValue.serverTimestamp(),
       });
 
-      // ✅ Verificar si el widget aún está montado, context puede no ser válido
-      // si la pantalla se ha cerrado antes de que se complete la operación
       if (!mounted) return;
 
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Te has unido al grupo exitosamente')),
       );
 
-      // Volver a la pantalla principal en caso de éxito
-      /*
-      Navigator.pushAndRemoveUntil(
-        context,
-        MaterialPageRoute(builder: (context) => const MainScreen()),
-        (Route<dynamic> route) => false,
-      );
-      */
       Navigator.pushAndRemoveUntil(
         context,
         MaterialPageRoute(builder: (context) => const MainScreen()),
@@ -109,8 +124,6 @@ class UnirseGrupoScreenState extends State<UnirseGrupoScreen> {
       );
     }
   }
-
- 
 
   @override
   Widget build(BuildContext context) {
@@ -141,12 +154,11 @@ class UnirseGrupoScreenState extends State<UnirseGrupoScreen> {
               ),
               const SizedBox(height: 20),
               ElevatedButton(
-                onPressed: _onSubmit,
-                style: ElevatedButton.styleFrom(
-                  minimumSize: const Size.fromHeight(48),
-                ),
-                child: const Text('Unirse')
-              ),
+                  onPressed: _onSubmit,
+                  style: ElevatedButton.styleFrom(
+                    minimumSize: const Size.fromHeight(48),
+                  ),
+                  child: const Text('Unirse')),
             ],
           ),
         ),

@@ -25,7 +25,7 @@ Future<void> registerUserForNotifications() async {
   final userDoc = FirebaseFirestore.instance.collection('usuarios').doc(deviceId);
 
   await userDoc.set({
-    'deviceId': deviceId,
+    'deviceId': deviceId,                    
     'fcmToken': token,
     'createdAt': FieldValue.serverTimestamp(),
   });

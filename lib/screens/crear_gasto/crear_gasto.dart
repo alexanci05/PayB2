@@ -34,6 +34,7 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
   // Para el gasto periodico
   bool _esPeriodico = false;
   String? _frecuenciaSeleccionada;
+  DateTime? _proximaFecha;
   final List<String> _frecuencias = [
     'Cada 7 días',
     'Cada 15 días',
@@ -132,6 +133,12 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
 
   final firestore = FirebaseFirestore.instance;
 
+  if (_esPeriodico && _frecuenciaSeleccionada != null) {
+    final proxima = calcularProximaFecha(fecha, _frecuenciaSeleccionada!);
+    _proximaFecha = proxima;
+  }
+
+
   try {
     // 1. Crear el gasto y obtener su referencia
     final gastoRef = await firestore
@@ -145,7 +152,9 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
         'fecha':     fecha,
         'created':   FieldValue.serverTimestamp(),
         'pagadoPor': _selectedPagadorId,
-        'frecuencia': _frecuenciaSeleccionada
+        'frecuencia': _frecuenciaSeleccionada,
+        'proximaFecha': _proximaFecha,
+
       });
     
 
@@ -174,6 +183,7 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
           'cantidad': roundedEach,
           'pagado': false,
           'created': FieldValue.serverTimestamp(),
+          'fecha': fecha,
           'nombre': nombreGasto,
           'pagadoPor': _selectedPagadorId,
         });
@@ -367,5 +377,26 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
         ),
       ),
     );
+  }
+}
+
+DateTime? calcularProximaFecha(DateTime fechaInicio, String frecuencia) {
+  switch (frecuencia) {
+    case 'Cada 7 días':
+      return fechaInicio.add(const Duration(days: 7));
+    case 'Cada 15 días':
+      return fechaInicio.add(const Duration(days: 15));
+    case 'Cada 30 días':
+      return fechaInicio.add(const Duration(days: 30));
+    case 'Cada 365 días':
+      return fechaInicio.add(const Duration(days: 365));
+    case 'Mensual (mismo día todos los meses)':
+      return DateTime(fechaInicio.year, fechaInicio.month + 1, fechaInicio.day);
+    case 'Trimestral (mismo día cada 3 meses)':
+      return DateTime(fechaInicio.year, fechaInicio.month + 3, fechaInicio.day);
+    case 'Anual (mismo día cada año)':
+      return DateTime(fechaInicio.year + 1, fechaInicio.month, fechaInicio.day);
+    default:
+      return null;
   }
 }

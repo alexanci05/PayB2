@@ -7,6 +7,7 @@ import 'package:payb2/providers/theme_provider.dart';
 import 'package:collection/collection.dart'; // para firstWhereOrNull
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:intl/intl.dart';
 
 // Pantalla principal cuando se pertenece a un grupo
 
@@ -270,6 +271,10 @@ class _WalletScreenState extends State<WalletScreen> {
         for (final splitDoc in splitsSnap.docs) {
           final splitData = splitDoc.data();
           final amount = (splitData['cantidad'] as num).toDouble();
+          final timestamp = splitData['fecha'] as Timestamp?;
+          final fecha = timestamp != null
+                        ? DateFormat('dd/MM/yyyy').format(timestamp.toDate())
+                        : 'Sin fecha';
 
           // Solo si debes y no eres tú quien pagó
           if (amount > 0 && pagadoPorId != phantomId) {
@@ -282,6 +287,7 @@ class _WalletScreenState extends State<WalletScreen> {
               pagadoPorId: pagadoPorId,
               pagadoPorName: memberMap[pagadoPorId] ?? 'Otro',
               myPhantomId: phantomId,
+              fecha: fecha,
             ));
           }
         }
@@ -317,26 +323,43 @@ class _WalletScreenState extends State<WalletScreen> {
               margin: const EdgeInsets.symmetric(vertical: 6),
               child: ListTile(
                 title: Text(d.gastoName),
-                subtitle: Text(
-                  '${d.groupName}\nDebes €${d.amount.toStringAsFixed(2)} a ${d.pagadoPorName}',
+                subtitle: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '${d.groupName}\nDebes €${d.amount.toStringAsFixed(2)} a ${d.pagadoPorName}',
+                    ),
+                    const SizedBox(height: 4),
+                    // Fecha en pequeño y sutil
+                    Text(
+                      '${d.fecha}', 
+                      style: TextStyle(
+                        fontSize: 12, // Tamaño pequeño para la fecha
+                        color: Colors.grey, // Color gris para que no resalte demasiado
+                      ),
+                    ),
+                  ],
                 ),
-                  isThreeLine: true,
-                  trailing: Row(
-                  mainAxisSize: MainAxisSize.min, // para que no ocupe todo el ancho
+                isThreeLine: true,
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min, // Para que no ocupe todo el ancho
                   children: [
                     ElevatedButton(
                       onPressed: () async {
                         // Actualizar splits a pagado
                         await FirebaseFirestore.instance
-                          .collection('groups').doc(d.groupId)
-                          .collection('gastos').doc(d.gastoId)
-                          .collection('divisiones').where('memberId', isEqualTo: d.myPhantomId)
-                          .get()
-                          .then((snap) {
-                            for (var doc in snap.docs) {
-                              doc.reference.update({'cantidad': 0, 'pagado': true});
-                            }
-                          });
+                            .collection('groups')
+                            .doc(d.groupId)
+                            .collection('gastos')
+                            .doc(d.gastoId)
+                            .collection('divisiones')
+                            .where('memberId', isEqualTo: d.myPhantomId)
+                            .get()
+                            .then((snap) {
+                              for (var doc in snap.docs) {
+                                doc.reference.update({'cantidad': 0, 'pagado': true});
+                              }
+                            });
 
                         // Refrescar lista
                         setState(() {
@@ -344,7 +367,7 @@ class _WalletScreenState extends State<WalletScreen> {
                         });
                       },
                       child: const Text('Marcar pagado'),
-                    )
+                    ),
                   ],
                 ),
               ),
@@ -366,6 +389,7 @@ class _DebtItem {
   final String pagadoPorId;
   final String pagadoPorName;  
   final String myPhantomId;
+  final String fecha;
 
   _DebtItem({
     required this.groupId,
@@ -376,6 +400,7 @@ class _DebtItem {
     required this.pagadoPorId,
     required this.pagadoPorName, 
     required this.myPhantomId,
+    required this.fecha
   });
 }
 

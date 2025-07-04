@@ -460,12 +460,31 @@ class _SaldosViewState extends State<SaldosView> {
                     final nombrePagador = widget.memberMap[pagadoPor]?['name'] ?? 'Otro';
                     final gastoId = d.reference.parent.parent!.id;
                     final divisionId = d.id;
+                    final timestamp = data['fecha'] as Timestamp?;
+                    final fecha = timestamp != null
+                        ? DateFormat('dd/MM/yyyy').format(timestamp.toDate())
+                        : 'Sin fecha';
 
-                    return Card(
+
+                   return Card(
                       margin: const EdgeInsets.symmetric(vertical: 6),
                       child: ListTile(
-                        title: Text(gastoNombre),
-                        subtitle: Text('Debes ${cantidad.toStringAsFixed(2)}€ a $nombrePagador'),
+                        title: Text('$gastoNombre'),
+                        subtitle: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('Debes ${cantidad.toStringAsFixed(2)}€ a $nombrePagador'),
+                            const SizedBox(height: 4),
+                            // Fecha en un texto pequeño y sutil
+                            Text(
+                              fecha,
+                              style: TextStyle(
+                                fontSize: 12, // Tamaño pequeño para la fecha
+                                color: Colors.grey, // Color gris para que no resalte tanto
+                              ),
+                            ),
+                          ],
+                        ),
                         trailing: Column(
                           mainAxisSize: MainAxisSize.min,
                           crossAxisAlignment: CrossAxisAlignment.end,
@@ -478,7 +497,8 @@ class _SaldosViewState extends State<SaldosView> {
                         ),
                       ),
                     );
-                  }),
+                  }
+                ),
               ],
             );
           },
