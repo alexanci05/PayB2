@@ -1,0 +1,146 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function membershipPath(groupId) {
+      return /databases/$(database)/documents/groupMembers/$(groupId + "_" + request.auth.uid);
+    }
+
+    function isGroupMember(groupId) {
+      return signedIn() && exists(membershipPath(groupId));
+    }
+
+    function isGroupOwner(groupId) {
+      return signedIn() &&
+        get(/databases/$(database)/documents/groups/$(groupId)).data.ownerDeviceId == request.auth.uid;
+    }
+
+    function ownsMemberIdentity(groupId, memberId) {
+      return isGroupMember(groupId) &&
+        get(/databases/$(database)/documents/groups/$(groupId)/members/$(memberId)).data.reclamadoPor == request.auth.uid;
+    }
+
+    function memberExists(groupId, memberId) {
+      return memberId is string &&
+        exists(/databases/$(database)/documents/groups/$(groupId)/members/$(memberId));
+    }
+
+    function validExpenseCreator(groupId) {
+      return request.resource.data.createdByUid == request.auth.uid &&
+        request.resource.data.createdByMemberId is string &&
+        request.resource.data.pagadoPor == request.resource.data.createdByMemberId &&
+        ownsMemberIdentity(groupId, request.resource.data.createdByMemberId);
+    }
+
+    function validExpenseCore(groupId) {
+      return request.resource.data.nombre is string &&
+        request.resource.data.nombre.size() > 0 &&
+        request.resource.data.nombre.size() <= 100 &&
+        request.resource.data.cantidadCentimos is int &&
+        request.resource.data.cantidadCentimos > 0 &&
+        memberExists(groupId, request.resource.data.pagadoPor);
+    }
+
+    match /usuarios/{uid} {
+      allow read, create, update, delete: if signedIn() && request.auth.uid == uid;
+    }
+
+    match /groupMembers/{membershipId} {
+      allow read: if signedIn() && resource.data.deviceId == request.auth.uid;
+      allow create, update, delete: if false;
+    }
+
+    match /groups/{groupId} {
+      allow create: if false;
+      allow read: if isGroupMember(groupId) || isGroupOwner(groupId);
+      allow update, delete: if isGroupOwner(groupId);
+
+      match /members/{memberId} {
+        allow read: if isGroupMember(groupId) || isGroupOwner(groupId);
+        allow create, delete: if signedIn() &&
+          getAfter(/databases/$(database)/documents/groups/$(groupId)).data.ownerDeviceId == request.auth.uid;
+        allow update: if isGroupOwner(groupId) ||
+          (isGroupMember(groupId) &&
+            resource.data.reclamadoPor == null &&
+            request.resource.data.reclamadoPor == request.auth.uid &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reclamadoPor']));
+      }
+
+      match /gastos/{gastoId} {
+        allow read: if isGroupMember(groupId);
+        allow create: if isGroupMember(groupId) &&
+          validExpenseCreator(groupId) &&
+          validExpenseCore(groupId) &&
+          request.resource.data.fecha is timestamp;
+        allow update: if false;
+        allow delete: if isGroupOwner(groupId) ||
+          (isGroupMember(groupId) && resource.data.createdByUid == request.auth.uid);
+
+        match /divisiones/{divisionId} {
+          allow read: if isGroupMember(groupId);
+          allow create: if isGroupMember(groupId) &&
+            divisionId == request.resource.data.memberId &&
+            memberExists(groupId, request.resource.data.memberId) &&
+            memberExists(groupId, request.resource.data.pagadoPor) &&
+            request.resource.data.groupId == groupId &&
+            request.resource.data.cantidadCentimos is int &&
+            request.resource.data.cantidadCentimos > 0 &&
+            request.resource.data.pagado is bool &&
+            request.resource.data.pagadoPor == getAfter(/databases/$(database)/documents/groups/$(groupId)/gastos/$(gastoId)).data.pagadoPor &&
+            request.resource.data.pagado == (request.resource.data.memberId == request.resource.data.pagadoPor) &&
+            getAfter(/databases/$(database)/documents/groups/$(groupId)/gastos/$(gastoId)).data.createdByUid == request.auth.uid;
+          allow update: if request.resource.data.diff(resource.data).affectedKeys().hasOnly(['pagado', 'pagadoEn']) &&
+            ((ownsMemberIdentity(groupId, resource.data.memberId) &&
+                resource.data.pagado == false &&
+                request.resource.data.pagado == true &&
+                request.resource.data.pagadoEn is timestamp) ||
+              (ownsMemberIdentity(groupId, resource.data.pagadoPor) &&
+                resource.data.pagado == true &&
+                request.resource.data.pagado == false &&
+                !request.resource.data.keys().hasAny(['pagadoEn'])));
+          allow delete: if isGroupOwner(groupId) ||
+            get(/databases/$(database)/documents/groups/$(groupId)/gastos/$(gastoId)).data.createdByUid == request.auth.uid;
+        }
+      }
+
+      match /gastosProgramados/{scheduleId} {
+        allow read: if isGroupMember(groupId);
+        allow create: if isGroupMember(groupId) &&
+          validExpenseCreator(groupId) &&
+          validExpenseCore(groupId) &&
+          request.resource.data.participantes is list &&
+          request.resource.data.participantes.size() > 0 &&
+          request.resource.data.proximaFecha is timestamp &&
+          (request.resource.data.frecuencia == null ||
+            request.resource.data.frecuencia in [
+              'Cada 7 días',
+              'Cada 15 días',
+              'Cada 30 días',
+              'Cada 365 días',
+              'Mensual (mismo día todos los meses)',
+              'Trimestral (mismo día cada 3 meses)',
+              'Anual (mismo día cada año)'
+            ]);
+        allow update: if false;
+        allow delete: if isGroupOwner(groupId) ||
+          (isGroupMember(groupId) && resource.data.createdByUid == request.auth.uid);
+      }
+    }
+
+    match /joinAttempts/{uid} {
+      allow read, write: if false;
+    }
+
+    match /groupCodes/{code} {
+      allow read, write: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

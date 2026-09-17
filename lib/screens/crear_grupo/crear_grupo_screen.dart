@@ -1,9 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:payb2/screens/home/main_screen.dart';
-import 'dart:math';
-import 'package:firebase_auth/firebase_auth.dart';
-
 
 class CrearGrupoScreen extends StatefulWidget {
   const CrearGrupoScreen({super.key});
@@ -43,55 +40,36 @@ class CrearGrupoScreenState extends State<CrearGrupoScreen> {
     if (!_formKey.currentState!.validate()) return;
 
     final nombre = _nombreController.text.trim();
+    final memberNames = _miembrosControllers
+        .map((controller) => controller.text.trim())
+        .where((name) => name.isNotEmpty)
+        .toList();
+
+    if (memberNames.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Añade al menos un miembro al grupo')),
+      );
+      return;
+    }
+
+    final normalizedNames = memberNames
+        .map((name) => name.toLowerCase())
+        .toSet();
+    if (normalizedNames.length != memberNames.length) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Los miembros deben tener nombres distintos'),
+        ),
+      );
+      return;
+    }
 
     try {
-      final user = FirebaseAuth.instance.currentUser;
-      if (user == null) {
-        throw Exception('Usuario no autenticado');
-      }
-      final uid = user.uid;
-      final groupRef = FirebaseFirestore.instance.collection('groups').doc();
-      final groupId = groupRef.id;
-      final groupCode = await _generateUniqueGroupCode();
-
-      // 1. Crear el grupo
-      await groupRef.set({
-        'name': nombre,
-        'createdAt': FieldValue.serverTimestamp(),
-        'groupCode': groupCode,
-        'ownerDeviceId': uid,
+      final callable = FirebaseFunctions.instance.httpsCallable('crearGrupo');
+      await callable.call<Map<String, dynamic>>({
+        'nombre': nombre,
+        'miembros': memberNames,
       });
-
-      // 2. Añadir miembro creador a groupMembers
-      final memberRef = FirebaseFirestore.instance
-          .collection('groupMembers')
-          .doc('${groupId}_$uid');
-
-      await memberRef.set({
-        'groupId': groupId,
-        'deviceId': uid,
-        'joinedAt': FieldValue.serverTimestamp(),
-      });
-
-      // Después de crear el grupo y al añadir al miembro “creador”:
-      /*
-      await groupRef
-        .collection('members')
-        .add({'name': 'Alex', 'reclamadoPor': deviceId});
-      */
-
-
-      // 3. Añadir miembros del grupo (si hay)
-      final membersCollection = groupRef.collection('members');
-      for (final controller in _miembrosControllers) {
-        final name = controller.text.trim();
-        if (name.isNotEmpty) {
-          await membersCollection.add({
-            'name': name,
-            'reclamadoPor': null,   // fuerza que exista el campo en null
-          });
-        }
-      }
 
       if (!mounted) return;
 
@@ -103,9 +81,20 @@ class CrearGrupoScreenState extends State<CrearGrupoScreen> {
         MaterialPageRoute(builder: (context) => const MainScreen()),
         (Route<dynamic> route) => false,
       );
-    } catch (e) {
+    } on FirebaseFunctionsException catch (error) {
+      if (!mounted) return;
+      final message = switch (error.code) {
+        'unauthenticated' => 'Usuario no autenticado',
+        'invalid-argument' => 'Revisa el nombre y los miembros del grupo',
+        _ => 'No se pudo crear el grupo',
+      };
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
+    } catch (_) {
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error: $e')),
+        const SnackBar(content: Text('No se pudo conectar con el servidor')),
       );
     }
   }
@@ -113,10 +102,7 @@ class CrearGrupoScreenState extends State<CrearGrupoScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Crear Grupo'),
-        centerTitle: true,
-      ),
+      appBar: AppBar(title: const Text('Crear Grupo'), centerTitle: true),
       body: Padding(
         padding: const EdgeInsets.all(16.0),
         child: Form(
@@ -155,7 +141,10 @@ class CrearGrupoScreenState extends State<CrearGrupoScreen> {
                         ),
                       ),
                       IconButton(
-                        icon: const Icon(Icons.remove_circle, color: Colors.red),
+                        icon: const Icon(
+                          Icons.remove_circle,
+                          color: Colors.red,
+                        ),
                         onPressed: () => _quitarCampoMiembro(index),
                       ),
                     ],
@@ -182,32 +171,3 @@ class CrearGrupoScreenState extends State<CrearGrupoScreen> {
     );
   }
 }
-
-
-
-Future<String> _generateUniqueGroupCode() async {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  final rand = Random();
-
-  String randomString() => String.fromCharCodes(
-        List.generate(8, (_) => chars.codeUnitAt(rand.nextInt(chars.length))),
-      );
-
-  String code;
-  bool exists = true;
-
-  do {
-    code = randomString();
-
-    final snapshot = await FirebaseFirestore.instance
-        .collection('groups')
-        .where('groupCode', isEqualTo: code)
-        .limit(1)
-        .get();
-
-    exists = snapshot.docs.isNotEmpty;
-  } while (exists);
-
-  return code;
-}
-

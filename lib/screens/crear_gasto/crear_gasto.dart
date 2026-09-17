@@ -1,15 +1,19 @@
-import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
-import 'package:flutter/services.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:intl/intl.dart';
+import 'package:payb2/domain/expense_split.dart';
 
-
-
-class CrearGastoScreen extends StatefulWidget{
+class CrearGastoScreen extends StatefulWidget {
   final String groupId;
-  final String uid;
+  final String currentMemberId;
 
-  const CrearGastoScreen({super.key, required this.groupId, required this.uid});
+  const CrearGastoScreen({
+    super.key,
+    required this.groupId,
+    required this.currentMemberId,
+  });
 
   @override
   CrearGastoScreenState createState() => CrearGastoScreenState();
@@ -17,25 +21,18 @@ class CrearGastoScreen extends StatefulWidget{
 
 class CrearGastoScreenState extends State<CrearGastoScreen> {
   final _formKey = GlobalKey<FormState>();
-  final TextEditingController _nombreGastoController = TextEditingController();
-  final TextEditingController _cantidadController = TextEditingController();
-  final TextEditingController _descripcionController = TextEditingController();
+  final _nombreGastoController = TextEditingController();
+  final _cantidadController = TextEditingController();
+  final _descripcionController = TextEditingController();
+
   DateTime? _selectedDate;
-
   List<Map<String, dynamic>> _usuarios = [];
-  String? _selectedPagadorId;
-
-   // IDs de los usuarios marcados para participar (sin el pagador)
   Set<String> _selectedParticipants = {};
-
-  // Checkbox “Seleccionar todos”
   bool _selectAll = false;
-
-  // Para el gasto periodico
   bool _esPeriodico = false;
   String? _frecuenciaSeleccionada;
-  DateTime? _proximaFecha;
-  final List<String> _frecuencias = [
+
+  static const _frecuencias = [
     'Cada 7 días',
     'Cada 15 días',
     'Cada 30 días',
@@ -45,38 +42,41 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
     'Anual (mismo día cada año)',
   ];
 
-
-
   @override
   void initState() {
     super.initState();
-    _selectedDate = DateTime.now(); // valor por defecto: hoy
+    _selectedDate = DateTime.now();
     _cargarUsuarios();
   }
 
-  Future<void> _cargarUsuarios() async{
+  Future<void> _cargarUsuarios() async {
     final snapshot = await FirebaseFirestore.instance
-      .collection('groups')
-      .doc(widget.groupId)
-      .collection('members')
-      .get();
+        .collection('groups')
+        .doc(widget.groupId)
+        .collection('members')
+        .get();
 
+    if (!mounted) return;
     setState(() {
-      _usuarios = snapshot.docs.map((doc) => {
-        'id': doc.id,
-        'nombre': doc['name'],
-      }).toList();
+      _usuarios = snapshot.docs
+          .map(
+            (doc) => {
+              'id': doc.id,
+              'nombre': doc.data()['name'] as String? ?? doc.id,
+            },
+          )
+          .toList();
+      _syncSelectAll();
     });
   }
-  
-  void _onToggleSelectAll(bool? v) {
+
+  void _onToggleSelectAll(bool? value) {
     setState(() {
-      _selectAll = v ?? false;
+      _selectAll = value ?? false;
       if (_selectAll) {
-        // selecciona todos menos el pagador
         _selectedParticipants = _usuarios
-            .map((u) => u['id'] as String)
-            .where((id) => id != _selectedPagadorId)
+            .map((user) => user['id'] as String)
+            .where((id) => id != widget.currentMemberId)
             .toSet();
       } else {
         _selectedParticipants.clear();
@@ -84,18 +84,25 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
     });
   }
 
-  void _onToggleParticipant(String id, bool? v) {
+  void _onToggleParticipant(String id, bool? value) {
     setState(() {
-      if (v == true){
+      if (value == true) {
         _selectedParticipants.add(id);
-      }else{
+      } else {
         _selectedParticipants.remove(id);
       }
-      // si no están todos marcados, quita selectAll
-      _selectAll = _usuarios
-          .where((u) => u['id'] != _selectedPagadorId)
-          .every((u) => _selectedParticipants.contains(u['id']));
+      _syncSelectAll();
     });
+  }
+
+  void _syncSelectAll() {
+    final eligibleIds = _usuarios
+        .map((user) => user['id'] as String)
+        .where((id) => id != widget.currentMemberId)
+        .toList();
+    _selectAll =
+        eligibleIds.isNotEmpty &&
+        eligibleIds.every(_selectedParticipants.contains);
   }
 
   @override
@@ -107,104 +114,221 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
   }
 
   Future<void> _onSubmit() async {
-  if (!_formKey.currentState!.validate()) return;
+    if (!_formKey.currentState!.validate()) return;
 
-  final nombreGasto   = _nombreGastoController.text.trim();
-  final cantidad      = double.tryParse(_cantidadController.text.replaceAll(',', '.'));
-  final descripcion   = _descripcionController.text.trim();
-  final fecha         = _selectedDate ?? DateTime.now();
-
-  if (cantidad == null || cantidad <= 0) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Cantidad inválida')),
+    final nombre = _nombreGastoController.text.trim();
+    final cantidadCentimos = parseAmountCents(_cantidadController.text);
+    final descripcion = _descripcionController.text.trim();
+    final selectedDate = _selectedDate ?? DateTime.now();
+    final fecha = DateTime.utc(
+      selectedDate.year,
+      selectedDate.month,
+      selectedDate.day,
+      12,
     );
-    return;
-  }
+    final today = DateTime.now();
+    final todayDate = DateTime(today.year, today.month, today.day);
+    final isFutureDate = DateTime(
+      selectedDate.year,
+      selectedDate.month,
+      selectedDate.day,
+    ).isAfter(todayDate);
+    final pagadoPor = widget.currentMemberId;
+    final createdByUid = FirebaseAuth.instance.currentUser?.uid;
 
-  if (_selectedPagadorId == null) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Debes elegir quién pagó')),
-    );
-    return;
-  }
-
-  // Sólo los participantes distintos al pagador:
-  final participants = _selectedParticipants.toList();
-
-  final firestore = FirebaseFirestore.instance;
-
-  if (_esPeriodico && _frecuenciaSeleccionada != null) {
-    final proxima = calcularProximaFecha(fecha, _frecuenciaSeleccionada!);
-    _proximaFecha = proxima;
-  }
-
-
-  try {
-    // 1. Crear el gasto y obtener su referencia
-    final gastoRef = await firestore
-      .collection('groups')
-      .doc(widget.groupId)
-      .collection('gastos')
-      .add({
-        'nombre':    nombreGasto,
-        'cantidad':  cantidad,
-        'descripcion': descripcion,
-        'fecha':     fecha,
-        'created':   FieldValue.serverTimestamp(),
-        'pagadoPor': _selectedPagadorId,
-        'frecuencia': _frecuenciaSeleccionada,
-        'proximaFecha': _proximaFecha,
-
-      });
-    
-
-    final gastoId = gastoRef.id;
-
-     // 2. Ahora calculamos si la fecha del gasto es de hoy o previa para no crear divisiones si la fecha aun no ha llegado
-    final now = DateTime.now();
-    final debeCrearDivisiones = !fecha.isAfter(now);
-    if (debeCrearDivisiones) {
-      final rawEach = cantidad / (participants.length + 1);
-      final roundedEach = double.parse(rawEach.toStringAsFixed(2));
-
-      final batch = firestore.batch();
-      for (var memberId in participants) {
-        final divisionesRef = firestore
-            .collection('groups')
-            .doc(widget.groupId)
-            .collection('gastos')
-            .doc(gastoId)
-            .collection('divisiones')
-            .doc();
-
-        batch.set(divisionesRef, {
-          'memberId': memberId,
-          'groupId': widget.groupId,
-          'cantidad': roundedEach,
-          'pagado': false,
-          'created': FieldValue.serverTimestamp(),
-          'fecha': fecha,
-          'nombre': nombreGasto,
-          'pagadoPor': _selectedPagadorId,
-        });
-      }
-      await batch.commit();
+    if (cantidadCentimos == null || cantidadCentimos <= 0) {
+      _showError('Cantidad inválida');
+      return;
+    }
+    if (createdByUid == null) {
+      _showError('Usuario no autenticado');
+      return;
     }
 
-    // Mensaje y volver atrás
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Gasto creado exitosamente')),
-    );
-    Navigator.pop(context);
+    final participantes =
+        _selectedParticipants
+            .where((memberId) => memberId != pagadoPor)
+            .toList()
+          ..sort();
+    if (participantes.isEmpty) {
+      _showError('Selecciona al menos un participante');
+      return;
+    }
+    if (cantidadCentimos < participantes.length + 1) {
+      _showError('El importe debe permitir al menos un céntimo por persona');
+      return;
+    }
 
-  } catch (e) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Error al crear gasto: $e')),
-    );
+    try {
+      final shares = splitExpenseCents(
+        totalCents: cantidadCentimos,
+        payerId: pagadoPor,
+        participantIds: participantes,
+      );
+      final firestore = FirebaseFirestore.instance;
+      final groupRef = firestore.collection('groups').doc(widget.groupId);
+      final batch = firestore.batch();
+
+      if (isFutureDate) {
+        final scheduleRef = groupRef.collection('gastosProgramados').doc();
+        batch.set(
+          scheduleRef,
+          _scheduleData(
+            nombre: nombre,
+            descripcion: descripcion,
+            cantidadCentimos: cantidadCentimos,
+            pagadoPor: pagadoPor,
+            participantes: participantes,
+            frecuencia: _esPeriodico ? _frecuenciaSeleccionada : null,
+            proximaFecha: fecha,
+            createdByUid: createdByUid,
+          ),
+        );
+      } else if (_esPeriodico) {
+        final frecuencia = _frecuenciaSeleccionada!;
+        final proximaFecha = nextOccurrenceDate(fecha, frecuencia);
+        if (proximaFecha == null) {
+          throw StateError('Frecuencia no válida');
+        }
+        final scheduleRef = groupRef.collection('gastosProgramados').doc();
+        final occurrenceKey = scheduledOccurrenceId(scheduleRef.id, fecha);
+        batch.set(
+          scheduleRef,
+          _scheduleData(
+            nombre: nombre,
+            descripcion: descripcion,
+            cantidadCentimos: cantidadCentimos,
+            pagadoPor: pagadoPor,
+            participantes: participantes,
+            frecuencia: frecuencia,
+            proximaFecha: proximaFecha,
+            createdByUid: createdByUid,
+          ),
+        );
+        _addOccurrenceAndDivisions(
+          batch: batch,
+          occurrenceRef: groupRef.collection('gastos').doc(occurrenceKey),
+          shares: shares,
+          nombre: nombre,
+          descripcion: descripcion,
+          cantidadCentimos: cantidadCentimos,
+          fecha: fecha,
+          pagadoPor: pagadoPor,
+          scheduleId: scheduleRef.id,
+          occurrenceKey: occurrenceKey,
+          createdByUid: createdByUid,
+        );
+      } else {
+        _addOccurrenceAndDivisions(
+          batch: batch,
+          occurrenceRef: groupRef.collection('gastos').doc(),
+          shares: shares,
+          nombre: nombre,
+          descripcion: descripcion,
+          cantidadCentimos: cantidadCentimos,
+          fecha: fecha,
+          pagadoPor: pagadoPor,
+          scheduleId: null,
+          occurrenceKey: null,
+          createdByUid: createdByUid,
+        );
+      }
+
+      await batch.commit();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Gasto creado exitosamente')),
+      );
+      Navigator.pop(context);
+    } catch (error) {
+      if (!mounted) return;
+      _showError('Error al crear gasto: $error');
+    }
   }
-}
 
+  Map<String, dynamic> _scheduleData({
+    required String nombre,
+    required String descripcion,
+    required int cantidadCentimos,
+    required String pagadoPor,
+    required List<String> participantes,
+    required String? frecuencia,
+    required DateTime proximaFecha,
+    required String createdByUid,
+  }) {
+    return {
+      'nombre': nombre,
+      'descripcion': descripcion,
+      'cantidad': cantidadCentimos / 100,
+      'cantidadCentimos': cantidadCentimos,
+      'pagadoPor': pagadoPor,
+      'participantes': participantes,
+      'frecuencia': frecuencia,
+      'proximaFecha': proximaFecha,
+      'created': FieldValue.serverTimestamp(),
+      'createdByMemberId': widget.currentMemberId,
+      'createdByUid': createdByUid,
+    };
+  }
+
+  void _addOccurrenceAndDivisions({
+    required WriteBatch batch,
+    required DocumentReference<Map<String, dynamic>> occurrenceRef,
+    required List<ExpenseShare> shares,
+    required String nombre,
+    required String descripcion,
+    required int cantidadCentimos,
+    required DateTime fecha,
+    required String pagadoPor,
+    required String? scheduleId,
+    required String? occurrenceKey,
+    required String createdByUid,
+  }) {
+    batch.set(occurrenceRef, {
+      'nombre': nombre,
+      'descripcion': descripcion,
+      'cantidad': cantidadCentimos / 100,
+      'cantidadCentimos': cantidadCentimos,
+      'fecha': fecha,
+      'created': FieldValue.serverTimestamp(),
+      'pagadoPor': pagadoPor,
+      'scheduleId': scheduleId,
+      'occurrenceKey': occurrenceKey,
+      'createdByMemberId': widget.currentMemberId,
+      'createdByUid': createdByUid,
+    });
+
+    for (final share in shares) {
+      final isPayer = share.memberId == pagadoPor;
+      batch.set(occurrenceRef.collection('divisiones').doc(share.memberId), {
+        'memberId': share.memberId,
+        'groupId': widget.groupId,
+        'cantidad': share.amountCents / 100,
+        'cantidadCentimos': share.amountCents,
+        'pagado': isPayer,
+        'pagadoEn': isPayer ? FieldValue.serverTimestamp() : null,
+        'created': FieldValue.serverTimestamp(),
+        'fecha': fecha,
+        'nombre': nombre,
+        'pagadoPor': pagadoPor,
+      });
+    }
+  }
+
+  void _showError(String message) {
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  String get _currentMemberName {
+    for (final user in _usuarios) {
+      if (user['id'] == widget.currentMemberId) {
+        return user['nombre'] as String;
+      }
+    }
+    return 'Tu identidad del grupo';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -212,9 +336,8 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
       appBar: AppBar(title: const Text('Crear Gasto')),
       body: SafeArea(
         child: Padding(
-          padding: const EdgeInsets.all(16.0),
+          padding: const EdgeInsets.all(16),
           child: SingleChildScrollView(
-            // Para evitar que el teclado corte el contenido
             child: Form(
               key: _formKey,
               child: Column(
@@ -222,9 +345,11 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
                 children: [
                   TextFormField(
                     controller: _nombreGastoController,
-                    decoration: const InputDecoration(labelText: 'Nombre del Gasto'),
+                    decoration: const InputDecoration(
+                      labelText: 'Nombre del gasto',
+                    ),
                     validator: (value) {
-                      if (value == null || value.isEmpty) {
+                      if (value == null || value.trim().isEmpty) {
                         return 'Por favor ingresa un nombre';
                       }
                       return null;
@@ -233,16 +358,19 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
                   TextFormField(
                     controller: _cantidadController,
                     decoration: const InputDecoration(labelText: 'Importe'),
-                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
                     inputFormatters: [
-                      FilteringTextInputFormatter.allow(RegExp(r'^\d*\.?\d{0,2}')),
+                      FilteringTextInputFormatter.allow(
+                        RegExp(r'^\d*[\.,]?\d{0,2}$'),
+                      ),
                     ],
                     validator: (value) {
-                      if (value == null || value.isEmpty) {
-                        return 'Por favor ingresa un importe';
-                      }
-                      final number = double.tryParse(value.replaceAll(',', '.'));
-                      if (number == null) {
+                      final cents = value == null
+                          ? null
+                          : parseAmountCents(value);
+                      if (cents == null || cents <= 0) {
                         return 'Importe no válido';
                       }
                       return null;
@@ -252,9 +380,9 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
                   TextFormField(
                     readOnly: true,
                     controller: TextEditingController(
-                      text: _selectedDate != null
-                          ? DateFormat('yyyy-MM-dd').format(_selectedDate!)
-                          : '',
+                      text: _selectedDate == null
+                          ? ''
+                          : DateFormat('yyyy-MM-dd').format(_selectedDate!),
                     ),
                     decoration: const InputDecoration(
                       labelText: 'Fecha del gasto',
@@ -264,110 +392,92 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
                     onTap: () async {
                       final pickedDate = await showDatePicker(
                         context: context,
-                        initialDate: DateTime.now(),
+                        initialDate: _selectedDate ?? DateTime.now(),
                         firstDate: DateTime(2000),
                         lastDate: DateTime(2100),
                       );
                       if (pickedDate != null) {
-                        setState(() {
-                          _selectedDate = pickedDate;
-                        });
+                        setState(() => _selectedDate = pickedDate);
                       }
                     },
                   ),
                   const SizedBox(height: 20),
-                  
                   CheckboxListTile(
                     title: const Text('¿Es un gasto periódico?'),
                     value: _esPeriodico,
                     onChanged: (value) {
                       setState(() {
-                        _esPeriodico = value!;
-                        if (!_esPeriodico) _frecuenciaSeleccionada = null;
+                        _esPeriodico = value ?? false;
+                        if (!_esPeriodico) {
+                          _frecuenciaSeleccionada = null;
+                        }
                       });
                     },
                   ),
                   if (_esPeriodico)
-                  DropdownButtonFormField<String>(
-                    value: _frecuenciaSeleccionada,
-                    decoration: const InputDecoration(
-                      labelText: 'Frecuencia',
-                      border: OutlineInputBorder(),
+                    DropdownButtonFormField<String>(
+                      value: _frecuenciaSeleccionada,
+                      decoration: const InputDecoration(
+                        labelText: 'Frecuencia',
+                        border: OutlineInputBorder(),
+                      ),
+                      items: _frecuencias
+                          .map(
+                            (frequency) => DropdownMenuItem(
+                              value: frequency,
+                              child: Text(frequency),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: (value) {
+                        setState(() => _frecuenciaSeleccionada = value);
+                      },
+                      validator: (value) {
+                        if (_esPeriodico && value == null) {
+                          return 'Selecciona una frecuencia';
+                        }
+                        return null;
+                      },
                     ),
-                    items: _frecuencias
-                        .map((f) => DropdownMenuItem(value: f, child: Text(f)))
-                        .toList(),
-                    onChanged: (val) {
-                      setState(() {
-                        _frecuenciaSeleccionada = val;
-                      });
-                    },
-                    validator: (val) {
-                      if (_esPeriodico && val == null) {
-                        return 'Selecciona una frecuencia';
-                      }
-                      return null;
-                    },
-                  ),
                   TextFormField(
                     controller: _descripcionController,
-                    decoration: const InputDecoration(labelText: 'Descripción (opcional)'),
+                    decoration: const InputDecoration(
+                      labelText: 'Descripción (opcional)',
+                    ),
                   ),
                   const SizedBox(height: 16),
-                  DropdownButtonFormField<String>(
-                    value: _selectedPagadorId,
+                  InputDecorator(
                     decoration: const InputDecoration(
-                      labelText: '¿Quién pagó?',
+                      labelText: 'Pagado por',
                       border: OutlineInputBorder(),
                     ),
-                    items: _usuarios.map<DropdownMenuItem<String>>((usuario) {
-                      return DropdownMenuItem<String>(
-                        value: usuario['id'] as String,
-                        child: Text(usuario['nombre']),
-                      );
-                    }).toList(),
-                    onChanged: (value) {
-                      setState(() {
-                        _selectedPagadorId = value;
-                      });
-                    },
-                    validator: (value) {
-                      if (value == null || value.isEmpty) {
-                        return 'Por favor selecciona quién pagó';
-                      }
-                      return null;
-                    },
+                    child: Text(_currentMemberName),
                   ),
                   const SizedBox(height: 20),
                   const Align(
                     alignment: Alignment.centerLeft,
                     child: Text('¿Entre quiénes se divide?'),
                   ),
-
-                  // Checkbox “Seleccionar todos”
                   CheckboxListTile(
                     title: const Text('Todos los miembros'),
                     value: _selectAll,
-                    onChanged: _selectedPagadorId == null ? null : _onToggleSelectAll,
+                    onChanged: _onToggleSelectAll,
                   ),
-
-                  // Lista de miembros con checkbox
                   ..._usuarios
-                      .where((u) => u['id'] != _selectedPagadorId) // excluye pagador
-                      .map((u) {
-                    final id = u['id'] as String;
-                    return CheckboxListTile(
-                      title: Text(u['nombre']),
-                      value: _selectedParticipants.contains(id),
-                      onChanged: (v) => _onToggleParticipant(id, v),
-                    );
-                  }),
-
+                      .where((user) => user['id'] != widget.currentMemberId)
+                      .map((user) {
+                        final id = user['id'] as String;
+                        return CheckboxListTile(
+                          title: Text(user['nombre'] as String),
+                          value: _selectedParticipants.contains(id),
+                          onChanged: (value) => _onToggleParticipant(id, value),
+                        );
+                      }),
                   const SizedBox(height: 20),
                   Center(
                     child: ElevatedButton(
                       onPressed: _onSubmit,
-                      child: const Text('Crear Gasto'),
+                      child: const Text('Crear gasto'),
                     ),
                   ),
                 ],
@@ -377,26 +487,5 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
         ),
       ),
     );
-  }
-}
-
-DateTime? calcularProximaFecha(DateTime fechaInicio, String frecuencia) {
-  switch (frecuencia) {
-    case 'Cada 7 días':
-      return fechaInicio.add(const Duration(days: 7));
-    case 'Cada 15 días':
-      return fechaInicio.add(const Duration(days: 15));
-    case 'Cada 30 días':
-      return fechaInicio.add(const Duration(days: 30));
-    case 'Cada 365 días':
-      return fechaInicio.add(const Duration(days: 365));
-    case 'Mensual (mismo día todos los meses)':
-      return DateTime(fechaInicio.year, fechaInicio.month + 1, fechaInicio.day);
-    case 'Trimestral (mismo día cada 3 meses)':
-      return DateTime(fechaInicio.year, fechaInicio.month + 3, fechaInicio.day);
-    case 'Anual (mismo día cada año)':
-      return DateTime(fechaInicio.year + 1, fechaInicio.month, fechaInicio.day);
-    default:
-      return null;
   }
 }

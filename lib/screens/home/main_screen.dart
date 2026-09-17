@@ -1,11 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:flutter_speed_dial/flutter_speed_dial.dart';  // Biblioteca para el botón flotante con múltiples opciones
+import 'package:flutter_speed_dial/flutter_speed_dial.dart'; // Biblioteca para el botón flotante con múltiples opciones
 import 'package:payb2/screens/grupo_detalles/grupo_detalle_screen.dart';
 import 'package:provider/provider.dart';
 import 'package:payb2/providers/theme_provider.dart';
 import 'package:collection/collection.dart'; // para firstWhereOrNull
-import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:intl/intl.dart';
 
@@ -20,40 +19,36 @@ class MainScreen extends StatefulWidget {
 
 class _MainScreenState extends State<MainScreen> {
   int _selectedIndex = 0;
-
-  static const List<Widget> _widgetOptions = <Widget>[
-    GroupsScreen(),
-    WalletScreen(),
-    SettingsScreen(),
-  ];
+  int _walletRevision = 0;
 
   void _onItemTapped(int index) {
     setState(() {
       _selectedIndex = index;
+      if (index == 1) _walletRevision++;
     });
   }
 
+  Widget _selectedScreen() {
+    return switch (_selectedIndex) {
+      0 => const GroupsScreen(),
+      1 => WalletScreen(key: ValueKey(_walletRevision)),
+      _ => const SettingsScreen(),
+    };
+  }
+
   void _onCrearGrupo(BuildContext context) {
-    
     Navigator.pushNamed(context, '/crearGrupo');
   }
 
   void _onUnirseAGrupo(BuildContext context) {
-    
     Navigator.pushNamed(context, '/unirseGrupo');
   }
-
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('PayB2'),
-        centerTitle: true,
-      ),
-      body: Center(
-        child: _widgetOptions.elementAt(_selectedIndex),
-      ),
+      appBar: AppBar(title: const Text('PayB2'), centerTitle: true),
+      body: Center(child: _selectedScreen()),
       floatingActionButton: SpeedDial(
         icon: Icons.add,
         activeIcon: Icons.close,
@@ -75,18 +70,12 @@ class _MainScreenState extends State<MainScreen> {
       ),
       bottomNavigationBar: BottomNavigationBar(
         items: const <BottomNavigationBarItem>[
-          BottomNavigationBarItem(
-            icon: Icon(Icons.group),
-            label: 'Grupos',
-          ),
+          BottomNavigationBarItem(icon: Icon(Icons.group), label: 'Grupos'),
           BottomNavigationBarItem(
             icon: Icon(Icons.account_balance_wallet),
             label: 'Cartera',
           ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.settings),
-            label: 'Ajustes',
-          ),
+          BottomNavigationBarItem(icon: Icon(Icons.settings), label: 'Ajustes'),
         ],
         currentIndex: _selectedIndex,
         onTap: _onItemTapped,
@@ -116,7 +105,6 @@ class _GroupsScreenState extends State<GroupsScreen> {
   Future<void> loadGroups() async {
     final id = await getUid();
 
-
     final memberQuery = await FirebaseFirestore.instance
         .collection('groupMembers')
         .where('deviceId', isEqualTo: id)
@@ -138,7 +126,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
       return FirebaseFirestore.instance.collection('groups').doc(id).get();
     });
     return await Future.wait(futures);
-  } 
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -149,8 +137,12 @@ class _GroupsScreenState extends State<GroupsScreen> {
     return FutureBuilder<List<DocumentSnapshot>>(
       future: futureGroups,
       builder: (context, snapshot) {
-        if (snapshot.hasError) return Center(child: Text('Error: ${snapshot.error}'));
-        if (!snapshot.hasData) return const Center(child: CircularProgressIndicator());
+        if (snapshot.hasError) {
+          return Center(child: Text('Error: ${snapshot.error}'));
+        }
+        if (!snapshot.hasData) {
+          return const Center(child: CircularProgressIndicator());
+        }
 
         final docs = snapshot.data!;
         if (docs.isEmpty) {
@@ -202,14 +194,20 @@ class _WalletScreenState extends State<WalletScreen> {
     _futureDebts = _loadDebts();
   }
 
-  
-  final functions = FirebaseFunctions.instance;
-
   Future<String> _loadUid() async {
     final id = await getUid();
     return id;
   }
 
+  double? _readDebtAmount(Map<String, dynamic> splitData) {
+    final cents = splitData['cantidadCentimos'];
+    if (cents is num) {
+      return cents.toDouble() / 100;
+    }
+
+    final amount = splitData['cantidad'];
+    return amount is num ? amount.toDouble() : null;
+  }
 
   Future<List<_DebtItem>> _loadDebts() async {
     final uid = await _loadUid();
@@ -227,12 +225,15 @@ class _WalletScreenState extends State<WalletScreen> {
     for (final gid in groupIds) {
       // a) Recupera nombre de grupo
       final groupDoc = await FirebaseFirestore.instance
-          .collection('groups').doc(gid).get();
+          .collection('groups')
+          .doc(gid)
+          .get();
       final groupName = groupDoc['name'] as String? ?? 'Grupo';
 
       // b) Cargamos todos los miembros de ese grupo y creamos memberMap
       final membersSnap = await FirebaseFirestore.instance
-          .collection('groups').doc(gid)
+          .collection('groups')
+          .doc(gid)
           .collection('members')
           .get();
       final Map<String, String> memberMap = {
@@ -240,7 +241,7 @@ class _WalletScreenState extends State<WalletScreen> {
           m.id: (m.data()['name'] as String? ?? '—'),
       };
 
-       // c) Intentamos encontrar el usuario fantasma
+      // c) Intentamos encontrar el usuario fantasma
       final phantomSnap = membersSnap.docs.firstWhereOrNull(
         (m) => (m.data()['reclamadoPor'] as String?) == uid,
       );
@@ -248,12 +249,13 @@ class _WalletScreenState extends State<WalletScreen> {
       if (phantomSnap == null) {
         continue;
       }
-      
+
       final phantomId = phantomSnap.id;
 
       // d) Recorre todos los gastos
       final gastosSnap = await FirebaseFirestore.instance
-          .collection('groups').doc(gid)
+          .collection('groups')
+          .doc(gid)
           .collection('gastos')
           .get();
 
@@ -270,25 +272,37 @@ class _WalletScreenState extends State<WalletScreen> {
 
         for (final splitDoc in splitsSnap.docs) {
           final splitData = splitDoc.data();
-          final amount = (splitData['cantidad'] as num).toDouble();
-          final timestamp = splitData['fecha'] as Timestamp?;
+          final amount = _readDebtAmount(splitData);
+          final gastoFecha = gastoData['fecha'];
+          final splitFecha = splitData['fecha'];
+          final timestamp = gastoFecha is Timestamp
+              ? gastoFecha
+              : splitFecha is Timestamp
+              ? splitFecha
+              : null;
           final fecha = timestamp != null
-                        ? DateFormat('dd/MM/yyyy').format(timestamp.toDate())
-                        : 'Sin fecha';
+              ? DateFormat('dd/MM/yyyy').format(timestamp.toDate())
+              : 'Sin fecha';
 
           // Solo si debes y no eres tú quien pagó
-          if (amount > 0 && pagadoPorId != phantomId) {
-            debts.add(_DebtItem(
-              groupId:     gid,
-              groupName:   groupName,
-              gastoId:     gastoDoc.id,
-              gastoName:   gastoName,
-              amount:      amount,
-              pagadoPorId: pagadoPorId,
-              pagadoPorName: memberMap[pagadoPorId] ?? 'Otro',
-              myPhantomId: phantomId,
-              fecha: fecha,
-            ));
+          if (splitData['pagado'] != true &&
+              amount != null &&
+              amount > 0 &&
+              pagadoPorId != phantomId) {
+            debts.add(
+              _DebtItem(
+                groupId: gid,
+                groupName: groupName,
+                gastoId: gastoDoc.id,
+                splitDocId: splitDoc.id,
+                gastoName: gastoName,
+                amount: amount,
+                pagadoPorId: pagadoPorId,
+                pagadoPorName: memberMap[pagadoPorId] ?? 'Otro',
+                myPhantomId: phantomId,
+                fecha: fecha,
+              ),
+            );
           }
         }
       }
@@ -297,6 +311,30 @@ class _WalletScreenState extends State<WalletScreen> {
     return debts;
   }
 
+  Future<void> _markDebtPaid(_DebtItem debt) async {
+    try {
+      await FirebaseFirestore.instance
+          .collection('groups')
+          .doc(debt.groupId)
+          .collection('gastos')
+          .doc(debt.gastoId)
+          .collection('divisiones')
+          .doc(debt.splitDocId)
+          .update({'pagado': true, 'pagadoEn': FieldValue.serverTimestamp()});
+
+      if (!mounted) return;
+      setState(() {
+        _futureDebts = _loadDebts();
+      });
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('No se pudo marcar la deuda como pagada: $error'),
+        ),
+      );
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -330,42 +368,19 @@ class _WalletScreenState extends State<WalletScreen> {
                       '${d.groupName}\nDebes €${d.amount.toStringAsFixed(2)} a ${d.pagadoPorName}',
                     ),
                     const SizedBox(height: 4),
-                    // Fecha en pequeño y sutil
                     Text(
-                      '${d.fecha}', 
-                      style: TextStyle(
-                        fontSize: 12, // Tamaño pequeño para la fecha
-                        color: Colors.grey, // Color gris para que no resalte demasiado
-                      ),
+                      d.fecha,
+                      style: const TextStyle(fontSize: 12, color: Colors.grey),
                     ),
                   ],
                 ),
                 isThreeLine: true,
                 trailing: Row(
-                  mainAxisSize: MainAxisSize.min, // Para que no ocupe todo el ancho
+                  mainAxisSize:
+                      MainAxisSize.min, // Para que no ocupe todo el ancho
                   children: [
                     ElevatedButton(
-                      onPressed: () async {
-                        // Actualizar splits a pagado
-                        await FirebaseFirestore.instance
-                            .collection('groups')
-                            .doc(d.groupId)
-                            .collection('gastos')
-                            .doc(d.gastoId)
-                            .collection('divisiones')
-                            .where('memberId', isEqualTo: d.myPhantomId)
-                            .get()
-                            .then((snap) {
-                              for (var doc in snap.docs) {
-                                doc.reference.update({'cantidad': 0, 'pagado': true});
-                              }
-                            });
-
-                        // Refrescar lista
-                        setState(() {
-                          _futureDebts = _loadDebts();
-                        });
-                      },
+                      onPressed: () => _markDebtPaid(d),
                       child: const Text('Marcar pagado'),
                     ),
                   ],
@@ -384,10 +399,11 @@ class _DebtItem {
   final String groupId;
   final String groupName;
   final String gastoId;
+  final String splitDocId;
   final String gastoName;
   final double amount;
   final String pagadoPorId;
-  final String pagadoPorName;  
+  final String pagadoPorName;
   final String myPhantomId;
   final String fecha;
 
@@ -395,15 +411,15 @@ class _DebtItem {
     required this.groupId,
     required this.groupName,
     required this.gastoId,
+    required this.splitDocId,
     required this.gastoName,
     required this.amount,
     required this.pagadoPorId,
-    required this.pagadoPorName, 
+    required this.pagadoPorName,
     required this.myPhantomId,
-    required this.fecha
+    required this.fecha,
   });
 }
-
 
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
@@ -420,7 +436,6 @@ class SettingsScreen extends StatelessWidget {
     );
   }
 }
-
 
 Future<String> getUid() async {
   final user = FirebaseAuth.instance.currentUser;

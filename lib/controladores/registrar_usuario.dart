@@ -1,34 +1,30 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter/foundation.dart';
 
 Future<void> registerUserForNotifications() async {
-  final prefs = await SharedPreferences.getInstance();
-  final alreadyRegistered = prefs.getBool('userRegistered') ?? false;
-
-  if (alreadyRegistered) return;
-
   final user = FirebaseAuth.instance.currentUser;
-  if (user == null) {
-    return;
-  }
+  if (user == null) return;
 
-  final deviceId = user.uid;
   final token = await FirebaseMessaging.instance.getToken();
+  if (token != null) await _saveMessagingToken(user.uid, token);
 
-  if (token == null) {
-    return;
-  }
+  FirebaseMessaging.instance.onTokenRefresh.listen((newToken) async {
+    try {
+      await _saveMessagingToken(user.uid, newToken);
+    } catch (error, stackTrace) {
+      debugPrint('No se pudo renovar el token FCM: $error\n$stackTrace');
+    }
+  });
+}
 
-  // Guardar usuario en Firestore
-  final userDoc = FirebaseFirestore.instance.collection('usuarios').doc(deviceId);
+Future<void> _saveMessagingToken(String uid, String token) async {
+  final userDoc = FirebaseFirestore.instance.collection('usuarios').doc(uid);
 
   await userDoc.set({
-    'deviceId': deviceId,                    
+    'deviceId': uid,
     'fcmToken': token,
-    'createdAt': FieldValue.serverTimestamp(),
-  });
-
-  await prefs.setBool('userRegistered', true);
+    'tokenUpdatedAt': FieldValue.serverTimestamp(),
+  }, SetOptions(merge: true));
 }

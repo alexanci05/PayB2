@@ -10,7 +10,6 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'main.dart'; // para usar flutterLocalNotificationsPlugin
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
-
 class MyApp extends StatefulWidget {
   const MyApp({super.key});
 
@@ -31,9 +30,8 @@ class _MyAppState extends State<MyApp> {
   Future<void> _initFirebaseAndMessaging() async {
     FirebaseMessaging.onMessage.listen((RemoteMessage message) {
       final notification = message.notification;
-      final android = notification?.android;
 
-      if (notification != null && android != null) {
+      if (notification != null) {
         flutterLocalNotificationsPlugin.show(
           notification.hashCode,
           notification.title,
@@ -41,10 +39,11 @@ class _MyAppState extends State<MyApp> {
           NotificationDetails(
             android: AndroidNotificationDetails(
               'canal_notificaciones', // ID del canal
-              'Notificaciones',        // Nombre visible
+              'Notificaciones', // Nombre visible
               importance: Importance.max,
               priority: Priority.high,
             ),
+            iOS: const DarwinNotificationDetails(),
           ),
         );
       }

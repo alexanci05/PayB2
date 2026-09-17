@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:payb2/controladores/registrar_usuario.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -9,14 +8,6 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  @override
-  void initState() {
-    super.initState();
-
-    // Registrar usuario para notificaciones al entrar por primera vez
-    registerUserForNotifications();
-  }
-
   void _onCrearGrupo(BuildContext context) {
     Navigator.pushNamed(context, '/crearGrupo');
   }
@@ -28,10 +19,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('PayB2'),
-        centerTitle: true,
-      ),
+      appBar: AppBar(title: const Text('PayB2'), centerTitle: true),
       body: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 48),
         child: Column(
