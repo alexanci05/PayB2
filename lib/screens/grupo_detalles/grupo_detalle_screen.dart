@@ -480,16 +480,18 @@ class _SaldosViewState extends State<SaldosView> {
     return divisiones;
   }
 
-  Future<void> _marcarPagado(String gastoId, String divisionId) async {
+  Future<void> _marcarPagado(
+    QueryDocumentSnapshot<Map<String, dynamic>> division,
+  ) async {
+    final currentMemberId = widget.myMemberId;
+    if (currentMemberId == null) return;
+
     try {
-      await FirebaseFirestore.instance
-          .collection('groups')
-          .doc(widget.groupId)
-          .collection('gastos')
-          .doc(gastoId)
-          .collection('divisiones')
-          .doc(divisionId)
-          .update({'pagado': true, 'pagadoEn': FieldValue.serverTimestamp()});
+      await division.reference.update({
+        'pagado': true,
+        'pagadoEn': FieldValue.serverTimestamp(),
+        'pagoRegistradoPor': currentMemberId,
+      });
 
       if (!mounted) return;
       setState(() {
@@ -531,6 +533,7 @@ class _SaldosViewState extends State<SaldosView> {
       await division.reference.update({
         'pagado': false,
         'pagadoEn': FieldValue.delete(),
+        'pagoRegistradoPor': FieldValue.delete(),
       });
 
       if (!mounted) return;
@@ -543,6 +546,31 @@ class _SaldosViewState extends State<SaldosView> {
         const SnackBar(content: Text('No se pudo reabrir el pago')),
       );
     }
+  }
+
+  Future<void> _confirmarCobro(
+    QueryDocumentSnapshot<Map<String, dynamic>> division,
+  ) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Registrar deuda como cobrada'),
+        content: const Text(
+          'La deuda dejará de aparecer como pendiente para este miembro.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Confirmar cobro'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) await _marcarPagado(division);
   }
 
   @override
@@ -631,6 +659,16 @@ class _SaldosViewState extends State<SaldosView> {
             final name = widget.memberMap[memberId]?['name'] ?? 'Sin nombre';
             final balance = totals[memberId] ?? 0.0;
             final isMe = memberId == widget.myMemberId;
+            final ownPendingDebts = pendientes.where((division) {
+              final data = division.data();
+              return data['memberId'] == widget.myMemberId;
+            });
+            final debtsOwedToMe = pendientes.where((division) {
+              final data = division.data();
+              return data['memberId'] == memberId &&
+                  data['pagadoPor'] == widget.myMemberId &&
+                  memberId != widget.myMemberId;
+            });
 
             return Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -651,65 +689,75 @@ class _SaldosViewState extends State<SaldosView> {
                     ),
                   ),
                 ),
-                if (isMe && balance > 0)
-                  ...pendientes
-                      .where((d) {
-                        final data = d.data();
-                        return data['memberId'] == widget.myMemberId;
-                      })
-                      .map((d) {
-                        final data = d.data();
-                        final cantidad = (data['cantidad'] as num).toDouble();
-                        final gastoNombre = data['nombre'] ?? 'Gasto';
-                        final pagadoPor = data['pagadoPor'] ?? '';
-                        final nombrePagador =
-                            widget.memberMap[pagadoPor]?['name'] ?? 'Otro';
-                        final gastoId = d.reference.parent.parent!.id;
-                        final divisionId = d.id;
-                        final timestamp = data['fecha'] as Timestamp?;
-                        final fecha = timestamp != null
-                            ? DateFormat(
-                                'dd/MM/yyyy',
-                              ).format(timestamp.toDate())
-                            : 'Sin fecha';
+                if (isMe)
+                  ...ownPendingDebts.map((d) {
+                    final data = d.data();
+                    final cantidad = (data['cantidad'] as num).toDouble();
+                    final gastoNombre = data['nombre'] ?? 'Gasto';
+                    final pagadoPor = data['pagadoPor'] ?? '';
+                    final nombrePagador =
+                        widget.memberMap[pagadoPor]?['name'] ?? 'Otro';
+                    final timestamp = data['fecha'] as Timestamp?;
+                    final fecha = timestamp != null
+                        ? DateFormat('dd/MM/yyyy').format(timestamp.toDate())
+                        : 'Sin fecha';
 
-                        return Card(
-                          margin: const EdgeInsets.symmetric(vertical: 6),
-                          child: ListTile(
-                            title: Text('$gastoNombre'),
-                            subtitle: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  'Debes ${cantidad.toStringAsFixed(2)}€ a $nombrePagador',
-                                ),
-                                const SizedBox(height: 4),
-                                // Fecha en un texto pequeño y sutil
-                                Text(
-                                  fecha,
-                                  style: TextStyle(
-                                    fontSize:
-                                        12, // Tamaño pequeño para la fecha
-                                    color: Colors
-                                        .grey, // Color gris para que no resalte tanto
-                                  ),
-                                ),
-                              ],
+                    return Card(
+                      margin: const EdgeInsets.symmetric(vertical: 6),
+                      child: ListTile(
+                        title: Text('$gastoNombre'),
+                        subtitle: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Debes ${cantidad.toStringAsFixed(2)}€ a $nombrePagador',
                             ),
-                            trailing: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              crossAxisAlignment: CrossAxisAlignment.end,
-                              children: [
-                                ElevatedButton(
-                                  onPressed: () =>
-                                      _marcarPagado(gastoId, divisionId),
-                                  child: const Text('Pagado'),
-                                ),
-                              ],
+                            const SizedBox(height: 4),
+                            // Fecha en un texto pequeño y sutil
+                            Text(
+                              fecha,
+                              style: TextStyle(
+                                fontSize: 12, // Tamaño pequeño para la fecha
+                                color: Colors
+                                    .grey, // Color gris para que no resalte tanto
+                              ),
                             ),
-                          ),
-                        );
-                      }),
+                          ],
+                        ),
+                        trailing: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            ElevatedButton(
+                              onPressed: () => _marcarPagado(d),
+                              child: const Text('Pagado'),
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  }),
+                if (!isMe)
+                  ...debtsOwedToMe.map((division) {
+                    final data = division.data();
+                    final amount = (data['cantidad'] as num).toDouble();
+                    final expenseName = data['nombre'] as String? ?? 'Gasto';
+
+                    return Card(
+                      margin: const EdgeInsets.symmetric(vertical: 6),
+                      child: ListTile(
+                        title: Text(expenseName),
+                        subtitle: Text(
+                          '$name te debe ${amount.toStringAsFixed(2)} €',
+                        ),
+                        trailing: IconButton(
+                          tooltip: 'Registrar como cobrado',
+                          icon: const Icon(Icons.check_circle_outline),
+                          onPressed: () => _confirmarCobro(division),
+                        ),
+                      ),
+                    );
+                  }),
               ],
             );
           },

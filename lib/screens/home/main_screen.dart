@@ -320,7 +320,11 @@ class _WalletScreenState extends State<WalletScreen> {
           .doc(debt.gastoId)
           .collection('divisiones')
           .doc(debt.splitDocId)
-          .update({'pagado': true, 'pagadoEn': FieldValue.serverTimestamp()});
+          .update({
+            'pagado': true,
+            'pagadoEn': FieldValue.serverTimestamp(),
+            'pagoRegistradoPor': debt.myPhantomId,
+          });
 
       if (!mounted) return;
       setState(() {

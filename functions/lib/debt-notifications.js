@@ -5,6 +5,9 @@ function debtNotificationForTransition(before, after) {
     if (!validMemberId(after.pagadoPor) || !validMemberId(after.memberId)) {
       return null;
     }
+    if (after.pagoRegistradoPor === after.pagadoPor) return null;
+    if (after.pagoRegistradoPor !== after.memberId) return null;
+
     return {
       targetMemberId: after.pagadoPor,
       title: '¡Una deuda fue pagada!',

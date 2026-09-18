@@ -7,10 +7,29 @@ const { debtNotificationForTransition } = require('../lib/debt-notifications');
 test('a paid debt notifies the creditor', () => {
   const notification = debtNotificationForTransition(
     { pagado: false },
-    { pagado: true, memberId: 'debtor', pagadoPor: 'creditor' },
+    {
+      pagado: true,
+      memberId: 'debtor',
+      pagadoPor: 'creditor',
+      pagoRegistradoPor: 'debtor',
+    },
   );
 
   assert.equal(notification.targetMemberId, 'creditor');
+});
+
+test('a debt closed by the creditor does not notify the creditor', () => {
+  const notification = debtNotificationForTransition(
+    { pagado: false },
+    {
+      pagado: true,
+      memberId: 'debtor',
+      pagadoPor: 'creditor',
+      pagoRegistradoPor: 'creditor',
+    },
+  );
+
+  assert.equal(notification, null);
 });
 
 test('a reopened debt notifies the debtor', () => {

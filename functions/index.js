@@ -310,10 +310,10 @@ async function generarOcurrenciaProgramada({ db, groupId, scheduleRef, now }) {
 exports.recordatorioDeudas = functions.pubsub
   .schedule("every day 15:00")
   .retryConfig({
-    retryCount: 5,
+    retryCount: 2,
     minBackoffDuration: "60s",
-    maxBackoffDuration: "15m",
-    maxDoublings: 4,
+    maxBackoffDuration: "5m",
+    maxDoublings: 2,
   })
   .timeZone("Europe/Madrid")
   .onRun(async (context) => {

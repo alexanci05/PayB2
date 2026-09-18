@@ -7,7 +7,9 @@
     "start": "npm run shell",
     "deploy": "firebase deploy --only functions",
     "logs": "firebase functions:log",
-    "test": "node --test"
+    "test": "node --test test/debt-notifications.test.js test/scheduled-occurrences.test.js",
+    "test:rules": "cd .. && npx --yes firebase-tools@13.35.1 --project demo-payb2-rules emulators:exec --only firestore \"npm --prefix functions run test:rules:run\"",
+    "test:rules:run": "node --test test/firestore-rules.test.js"
   },
   "engines": {
     "node": "20"
@@ -17,5 +19,9 @@
     "firebase-admin": "^14.4.0",
     "firebase-functions": "^7.4.0"
   },
-  "private": true
+  "private": true,
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^5.0.2",
+    "firebase": "^12.0.0"
+  }
 }

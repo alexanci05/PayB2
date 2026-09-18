@@ -93,15 +93,18 @@ service cloud.firestore {
             request.resource.data.pagadoPor == getAfter(/databases/$(database)/documents/groups/$(groupId)/gastos/$(gastoId)).data.pagadoPor &&
             request.resource.data.pagado == (request.resource.data.memberId == request.resource.data.pagadoPor) &&
             getAfter(/databases/$(database)/documents/groups/$(groupId)/gastos/$(gastoId)).data.createdByUid == request.auth.uid;
-          allow update: if request.resource.data.diff(resource.data).affectedKeys().hasOnly(['pagado', 'pagadoEn']) &&
-            ((ownsMemberIdentity(groupId, resource.data.memberId) &&
-                resource.data.pagado == false &&
+          allow update: if request.resource.data.diff(resource.data).affectedKeys().hasOnly(['pagado', 'pagadoEn', 'pagoRegistradoPor']) &&
+            ((resource.data.pagado == false &&
                 request.resource.data.pagado == true &&
-                request.resource.data.pagadoEn is timestamp) ||
+                request.resource.data.pagadoEn is timestamp &&
+                ((ownsMemberIdentity(groupId, resource.data.memberId) &&
+                    request.resource.data.pagoRegistradoPor == resource.data.memberId) ||
+                  (ownsMemberIdentity(groupId, resource.data.pagadoPor) &&
+                    request.resource.data.pagoRegistradoPor == resource.data.pagadoPor))) ||
               (ownsMemberIdentity(groupId, resource.data.pagadoPor) &&
                 resource.data.pagado == true &&
                 request.resource.data.pagado == false &&
-                !request.resource.data.keys().hasAny(['pagadoEn'])));
+                !request.resource.data.keys().hasAny(['pagadoEn', 'pagoRegistradoPor'])));
           allow delete: if isGroupOwner(groupId) ||
             get(/databases/$(database)/documents/groups/$(groupId)/gastos/$(gastoId)).data.createdByUid == request.auth.uid;
         }
