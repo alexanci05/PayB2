@@ -9,10 +9,12 @@
     "logs": "firebase functions:log",
     "test": "node --test test/debt-notifications.test.js test/scheduled-occurrences.test.js",
     "test:rules": "cd .. && npx --yes firebase-tools@13.35.1 --project demo-payb2-rules emulators:exec --only firestore \"npm --prefix functions run test:rules:run\"",
-    "test:rules:run": "node --test test/firestore-rules.test.js"
+    "test:rules:run": "node --test test/firestore-rules.test.js",
+    "test:integration": "cd .. && npx --yes firebase-tools@13.35.1 --project demo-payb2-functions emulators:exec --only firestore \"npm --prefix functions run test:integration:run\"",
+    "test:integration:run": "node --test test/functions-entry-points.test.js"
   },
   "engines": {
-    "node": "20"
+    "node": "22"
   },
   "main": "index.js",
   "dependencies": {

@@ -1,5 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
@@ -120,31 +120,12 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
     final cantidadCentimos = parseAmountCents(_cantidadController.text);
     final descripcion = _descripcionController.text.trim();
     final selectedDate = _selectedDate ?? DateTime.now();
-    final fecha = DateTime.utc(
-      selectedDate.year,
-      selectedDate.month,
-      selectedDate.day,
-      12,
-    );
-    final today = DateTime.now();
-    final todayDate = DateTime(today.year, today.month, today.day);
-    final isFutureDate = DateTime(
-      selectedDate.year,
-      selectedDate.month,
-      selectedDate.day,
-    ).isAfter(todayDate);
     final pagadoPor = widget.currentMemberId;
-    final createdByUid = FirebaseAuth.instance.currentUser?.uid;
 
     if (cantidadCentimos == null || cantidadCentimos <= 0) {
       _showError('Cantidad inválida');
       return;
     }
-    if (createdByUid == null) {
-      _showError('Usuario no autenticado');
-      return;
-    }
-
     final participantes =
         _selectedParticipants
             .where((memberId) => memberId != pagadoPor)
@@ -160,81 +141,16 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
     }
 
     try {
-      final shares = splitExpenseCents(
-        totalCents: cantidadCentimos,
-        payerId: pagadoPor,
-        participantIds: participantes,
-      );
-      final firestore = FirebaseFirestore.instance;
-      final groupRef = firestore.collection('groups').doc(widget.groupId);
-      final batch = firestore.batch();
-
-      if (isFutureDate) {
-        final scheduleRef = groupRef.collection('gastosProgramados').doc();
-        batch.set(
-          scheduleRef,
-          _scheduleData(
-            nombre: nombre,
-            descripcion: descripcion,
-            cantidadCentimos: cantidadCentimos,
-            pagadoPor: pagadoPor,
-            participantes: participantes,
-            frecuencia: _esPeriodico ? _frecuenciaSeleccionada : null,
-            proximaFecha: fecha,
-            createdByUid: createdByUid,
-          ),
-        );
-      } else if (_esPeriodico) {
-        final frecuencia = _frecuenciaSeleccionada!;
-        final proximaFecha = nextOccurrenceDate(fecha, frecuencia);
-        if (proximaFecha == null) {
-          throw StateError('Frecuencia no válida');
-        }
-        final scheduleRef = groupRef.collection('gastosProgramados').doc();
-        final occurrenceKey = scheduledOccurrenceId(scheduleRef.id, fecha);
-        batch.set(
-          scheduleRef,
-          _scheduleData(
-            nombre: nombre,
-            descripcion: descripcion,
-            cantidadCentimos: cantidadCentimos,
-            pagadoPor: pagadoPor,
-            participantes: participantes,
-            frecuencia: frecuencia,
-            proximaFecha: proximaFecha,
-            createdByUid: createdByUid,
-          ),
-        );
-        _addOccurrenceAndDivisions(
-          batch: batch,
-          occurrenceRef: groupRef.collection('gastos').doc(occurrenceKey),
-          shares: shares,
-          nombre: nombre,
-          descripcion: descripcion,
-          cantidadCentimos: cantidadCentimos,
-          fecha: fecha,
-          pagadoPor: pagadoPor,
-          scheduleId: scheduleRef.id,
-          occurrenceKey: occurrenceKey,
-          createdByUid: createdByUid,
-        );
-      } else {
-        _addOccurrenceAndDivisions(
-          batch: batch,
-          occurrenceRef: groupRef.collection('gastos').doc(),
-          shares: shares,
-          nombre: nombre,
-          descripcion: descripcion,
-          cantidadCentimos: cantidadCentimos,
-          fecha: fecha,
-          pagadoPor: pagadoPor,
-          scheduleId: null,
-          occurrenceKey: null,
-          createdByUid: createdByUid,
-        );
-      }
-
-      await batch.commit();
+      await FirebaseFunctions.instance.httpsCallable('crearGasto').call({
+        'groupId': widget.groupId,
+        'nombre': nombre,
+        'descripcion': descripcion,
+        'cantidadCentimos': cantidadCentimos,
+        'fecha': DateFormat('yyyy-MM-dd').format(selectedDate),
+        'pagadoPor': pagadoPor,
+        'participantes': participantes,
+        'frecuencia': _esPeriodico ? _frecuenciaSeleccionada : null,
+      });
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Gasto creado exitosamente')),
@@ -243,75 +159,6 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
     } catch (error) {
       if (!mounted) return;
       _showError('Error al crear gasto: $error');
-    }
-  }
-
-  Map<String, dynamic> _scheduleData({
-    required String nombre,
-    required String descripcion,
-    required int cantidadCentimos,
-    required String pagadoPor,
-    required List<String> participantes,
-    required String? frecuencia,
-    required DateTime proximaFecha,
-    required String createdByUid,
-  }) {
-    return {
-      'nombre': nombre,
-      'descripcion': descripcion,
-      'cantidad': cantidadCentimos / 100,
-      'cantidadCentimos': cantidadCentimos,
-      'pagadoPor': pagadoPor,
-      'participantes': participantes,
-      'frecuencia': frecuencia,
-      'proximaFecha': proximaFecha,
-      'created': FieldValue.serverTimestamp(),
-      'createdByMemberId': widget.currentMemberId,
-      'createdByUid': createdByUid,
-    };
-  }
-
-  void _addOccurrenceAndDivisions({
-    required WriteBatch batch,
-    required DocumentReference<Map<String, dynamic>> occurrenceRef,
-    required List<ExpenseShare> shares,
-    required String nombre,
-    required String descripcion,
-    required int cantidadCentimos,
-    required DateTime fecha,
-    required String pagadoPor,
-    required String? scheduleId,
-    required String? occurrenceKey,
-    required String createdByUid,
-  }) {
-    batch.set(occurrenceRef, {
-      'nombre': nombre,
-      'descripcion': descripcion,
-      'cantidad': cantidadCentimos / 100,
-      'cantidadCentimos': cantidadCentimos,
-      'fecha': fecha,
-      'created': FieldValue.serverTimestamp(),
-      'pagadoPor': pagadoPor,
-      'scheduleId': scheduleId,
-      'occurrenceKey': occurrenceKey,
-      'createdByMemberId': widget.currentMemberId,
-      'createdByUid': createdByUid,
-    });
-
-    for (final share in shares) {
-      final isPayer = share.memberId == pagadoPor;
-      batch.set(occurrenceRef.collection('divisiones').doc(share.memberId), {
-        'memberId': share.memberId,
-        'groupId': widget.groupId,
-        'cantidad': share.amountCents / 100,
-        'cantidadCentimos': share.amountCents,
-        'pagado': isPayer,
-        'pagadoEn': isPayer ? FieldValue.serverTimestamp() : null,
-        'created': FieldValue.serverTimestamp(),
-        'fecha': fecha,
-        'nombre': nombre,
-        'pagadoPor': pagadoPor,
-      });
     }
   }
 

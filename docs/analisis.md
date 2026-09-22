@@ -1,204 +1,170 @@
-# Estado del analisis de PayB2
+# Auditoría actual de PayB2
 
-Actualizado el 18 de septiembre de 2026.
+Actualizado el 22 de septiembre de 2026.
 
-Este documento mantiene los problemas de la revision inicial, pero refleja su estado actual. Los titulos tachados estan solucionados. Los puntos sin tachar siguen pendientes o necesitan validacion adicional.
+Este documento contiene solo problemas presentes en el código actual. Los errores ya corregidos se han eliminado del historial.
 
-La prioridad actual es consolidar una aplicacion movil útil, fiable y presentable como proyecto solido. La publicacion, la firma definitiva y las optimizaciones para una escala todavia desconocida se abordaran en el futuro.
+## Problemas críticos
 
-## Problemas criticos
+### 1. Un usuario puede apropiarse de varias identidades del mismo grupo
 
-No quedan problemas criticos conocidos.
+**Dónde:** `firestore.rules:62-70` y `lib/screens/grupo_detalles/grupo_detalle_screen.dart:60-151`.
 
-### ~~1. Los gastos periodicos reutilizaban deudas antiguas~~
+La interfaz deja de preguntar cuando encuentra una identidad reclamada por el UID, pero las reglas solo comprueban que la identidad concreta elegida esté libre. Un cliente directo puede repetir la escritura sobre todas las identidades que sigan a `null`.
 
-**Resuelto.** Las recurrencias parten de una programacion inmutable y crean ocurrencias y divisiones independientes con identificadores deterministas. Un reintento no duplica el periodo.
+**Consecuencia:** una persona puede convertirse a efectos de autorización en varios deudores o acreedores y confirmar pagos ajenos. La transacción impide que dos usuarios reclamen a la vez la misma identidad, pero no que un UID reclame identidades distintas.
 
-### ~~2. Los gastos futuros podian no generar deudas~~
+**Solución lógica:** convertir la reclamación en una operación de servidor y mantener una relación única y atómica `grupo + UID -> memberId`. Se debe verificar tanto que la identidad esté libre como que el UID no tenga otra.
 
-**Resuelto.** Los gastos futuros, sean puntuales o periodicos, se guardan en `gastosProgramados`. La Function crea sus divisiones correctamente cuando llega `proximaFecha`.
+## Prioridad alta
 
-### ~~3. Cartera podia pagar varias divisiones y borrar el importe~~
+### 2. Un doble toque puede duplicar gastos, recurrencias y grupos
 
-**Resuelto.** Cada accion conserva el identificador exacto de la division. Pagar solo cambia su estado y mantiene el importe historico.
+**Dónde:** `lib/screens/crear_gasto/crear_gasto.dart`, `functions/index.js` (`crearGasto`) y `lib/screens/crear_grupo/crear_grupo_screen.dart`.
 
-### ~~4. El reparto podia producir importes incorrectos~~
+Los botones continúan activos mientras la operación está en curso. Cada envío crea referencias nuevas, por lo que dos pulsaciones rápidas producen dos operaciones válidas. En un gasto periódico quedan dos series generando deudas futuras.
 
-**Resuelto.** El reparto trabaja con centimos enteros, distribuye el residuo de forma determinista y rechaza importes que no permiten asignar al menos un centimo por persona.
+**Solución lógica:** representar el estado de envío, aceptar una sola acción hasta recibir respuesta y usar una clave idempotente estable en servidor. Desactivar el botón evita el doble toque normal; la idempotencia cubre también reintentos de red.
 
-## Problemas de prioridad alta
+### 3. Las recurrencias de fin de mes pierden su día original
 
-No quedan problemas de prioridad alta conocidos.
+**Dónde:** `functions/lib/scheduled-occurrences.js:60-77`, `functions/lib/scheduled-occurrences.js:97-124`, `functions/index.js:260-305` y `lib/domain/expense_split.dart:70-118`.
 
-### ~~5. Un usuario podia registrar como pagador a otra persona~~
+Cada fecha se calcula desde la anterior ya ajustada. Una serie mensual del 31 de enero pasa al 28 de febrero y continúa el 28 de marzo. Una serie anual del 29 de febrero queda fijada al 28 incluso cuando vuelve a existir un año bisiesto.
 
-**Resuelto.** Quien crea el gasto queda como pagador mediante su identidad reclamada. Esta relacion se valida tambien en las reglas.
+**Solución lógica:** guardar el día de anclaje original. Cada nueva ocurrencia debe calcularse para su periodo objetivo usando ese anclaje; solo se recorta cuando ese mes concreto no contiene el día original.
 
-### ~~6. Se podia crear un grupo sin miembros~~
+### 4. La identidad anónima no se recupera tras reinstalar o cambiar de dispositivo
 
-**Resuelto.** Cliente y Callable exigen al menos un miembro y rechazan nombres vacios o duplicados.
+**Dónde:** `lib/main.dart:18`, `lib/main.dart:39-45`, `lib/screens/grupo_detalles/grupo_detalle_screen.dart:60-151` y `firestore.rules:66-70`.
 
-### ~~7. La creacion de grupos y gastos no era atomica~~
+`reclamadoPor` queda unido al UID anónimo del dispositivo. Al borrar los datos, reinstalar o usar otro teléfono, Firebase crea otro UID. El usuario puede volver a unirse si conserva el código, pero su identidad sigue ocupada por el UID antiguo. Si era propietario, también pierde esos permisos.
 
-**Resuelto.** Los documentos relacionados se escriben mediante transacciones o batches atomicos.
+**Solución lógica:** definir una identidad recuperable, mediante una cuenta enlazada o una transferencia controlada y verificable. El UID temporal del dispositivo no debe ser la única llave permanente.
 
-### ~~8. Las reglas de Firestore no estaban versionadas~~
+### 5. Los permisos del propietario permiten romper la identidad del grupo
 
-**Resuelto.** `firestore.rules` forma parte del repositorio y `firebase.json` apunta a ese archivo.
+**Dónde:** `firestore.rules:57-70` y `functions/index.js:42-69`.
 
-### ~~9. Cualquier miembro podia intentar borrar cualquier gasto~~
+El propietario puede modificar cualquier campo de `groups`, incluidos `groupCode` y `ownerDeviceId`, y cualquier campo de un miembro, incluido `reclamadoPor`. La reserva en `groupCodes` no cambia si se altera el código directamente y el propietario puede reasignar identidades reclamadas.
 
-**Resuelto.** La interfaz limita la accion al propietario del grupo o creador del gasto, pide confirmacion y las reglas aplican la misma autorizacion.
+**Solución lógica:** permitir solo campos con un flujo definido. Cambiar código, propietario o identidad requiere una operación específica y atómica; mientras no exista, esas actualizaciones deben estar cerradas.
 
-### ~~10. El token FCM no se renovaba~~
+### 6. Los borrados directos pueden dejar datos huérfanos
 
-**Resuelto.** El token se registra en cada arranque autenticado y se actualiza mediante `onTokenRefresh` sin bloquear el inicio de la aplicacion.
+**Dónde:** `firestore.rules` (borrados de grupos y gastos) y `lib/screens/grupo_detalles/grupo_detalle_screen.dart:939-976`.
 
-### ~~11. Las notificaciones en primer plano no funcionaban en iOS~~
+Firestore no elimina subcolecciones al borrar el padre. La interfaz borra las divisiones junto con el gasto, pero las reglas permiten borrar directamente solo el gasto o el grupo. Pueden quedar divisiones, miembros, programaciones, pertenencias y reservas de código sin padre. Una división individual ya no puede borrarse mientras permanezca su gasto.
 
-**Resuelto en codigo.** El listener acepta notificaciones de ambas plataformas y configura `DarwinNotificationDetails`. Queda incluida en la validacion pendiente con dispositivo real.
+**Solución lógica:** centralizar los borrados compuestos en servidor y eliminar todos los documentos relacionados. Si se conserva historial, usar cancelación lógica y excluir esos documentos de las consultas.
 
-### ~~12. Functions acumulaba vulnerabilidades criticas y altas~~
+## Prioridad media
 
-**Resuelto el riesgo grave.** Firebase Admin y Firebase Functions se actualizaron. El audit paso de 21 vulnerabilidades a 2 moderadas transitivas, recogidas como pendiente de prioridad media.
+### 7. Una recurrencia atrasada solo recupera una ocurrencia al día
 
-### ~~13. Dos usuarios podian reclamar simultaneamente la misma identidad~~
+**Dónde:** `functions/index.js:203-233` y `functions/index.js:244-306`.
 
-**Resuelto.** La reclamacion usa una transaccion que vuelve a comprobar `reclamadoPor` antes de escribir.
+El planificador obtiene la programación vencida una vez, crea una ocurrencia y avanza un intervalo. Aunque la nueva fecha siga vencida, no vuelve a procesarla hasta el día siguiente. Una serie semanal atrasada cuatro semanas tarda cuatro días en ponerse al día.
 
-## Problemas de prioridad media
+**Solución lógica:** decidir una política explícita. Si deben conservarse todos los vencimientos, generar los atrasados hasta el presente con un límite seguro y continuación controlada. Si no, saltar expresamente a la primera fecha futura.
 
-### Validacion real de notificaciones pendiente
+### 8. Saldos y estadísticas no reaccionan a cambios de otros dispositivos
 
-La seleccion del destinatario y los reintentos estan probados como logica, pero falta verificar en dispositivos reales Android e iOS el ciclo completo FCM/APNs: renovacion del token, recepcion en primer plano y segundo plano, pago, reapertura y tokens invalidos.
+**Dónde:** `lib/screens/grupo_detalles/grupo_detalle_screen.dart:452-480`, `lib/screens/grupo_detalles/grupo_detalle_screen.dart:578-766` y `lib/screens/grupo_detalles/grupo_detalle_screen.dart:780-808`.
 
-### 19. Las Functions realizan demasiadas lecturas en serie
+Estas vistas usan un `Future` cargado una vez. Se actualizan tras determinadas acciones locales, pero no cuando otro miembro crea, paga, reabre o elimina datos mientras la pantalla sigue abierta.
 
-Los recordatorios siguen recorriendo usuarios, grupos, gastos y divisiones mediante consultas anidadas. Es correcto para la escala actual de desarrollo, pero aumentara el coste y el tiempo de ejecucion si crece el numero de datos.
+**Solución lógica:** observar una fuente que cambie con escrituras remotas o invalidar las vistas derivadas al cambiar gastos y divisiones.
 
-**Decision actual:** posponer una coleccion derivada o indices de deudas pendientes hasta conocer la escala real del proyecto.
+### 9. Cartera, saldos y recordatorios recorren jerarquías completas en serie
 
-### 29. Dependencias Flutter pendientes de actualizaciones mayores
+**Dónde:** `lib/screens/home/main_screen.dart:212-311`, `lib/screens/grupo_detalles/grupo_detalle_screen.dart:462-480` y `functions/index.js:324-423`.
 
-El proyecto conserva varias versiones anteriores a las ultimas disponibles. No existe ahora un fallo funcional asociado que justifique una migracion masiva.
+Para encontrar deudas se leen grupos, miembros, todos los gastos y después divisiones gasto por gasto. El recordatorio repite ese árbol para cada usuario. El coste crece con todos los datos históricos, no solo con las deudas pendientes.
 
-**Decision actual:** actualizar por bloques cuando exista una mejora concreta y ejecutar las pruebas despues de cada bloque.
+**Solución lógica:** consultar deudas pendientes por deudor y estado desde una estructura indexable. No exige una migración inmediata en esta fase, pero conviene no construir flujos nuevos sobre recorridos completos.
 
-### Dependencias transitivas con dos avisos moderados
+### 10. Los dos trabajos diarios compiten a la misma hora
 
-`npm audit --omit=dev` mantiene dos avisos moderados procedentes de `firebase-admin`, `@google-cloud/storage`, `gaxios` y `uuid`. `npm audit fix --dry-run` no encuentra una actualizacion compatible adicional. No se aplicara un override inseguro.
+**Dónde:** `functions/index.js:185-193` y `functions/index.js:310-318`.
 
-### Compilacion y pruebas iOS pendientes
+La generación de recurrencias y el recordatorio están programados para las 15:00. No hay orden garantizado: el recordatorio puede terminar antes de crear la deuda periódica del día y avisarla un día tarde.
 
-CocoaPods resuelve correctamente, pero este equipo no tiene instalada la plataforma iOS 26.2 para el simulador. Falta compilar y probar la aplicacion cuando esa plataforma este disponible.
+**Solución lógica:** generar primero las recurrencias y programar después los recordatorios con margen, o encadenar ambos pasos bajo una coordinación común.
 
-### ~~14. Saldos, Estadisticas y Cartera mostraban datos antiguos~~
+### 11. La lista de pagos atribuye al deudor cobros registrados por el acreedor
 
-**Resuelto.** Las vistas derivadas se invalidan tras crear, borrar, pagar o reabrir una deuda, y Cartera se reconstruye al seleccionarla.
+**Dónde:** `lib/screens/grupo_detalles/grupo_detalle_screen.dart:592-597` y `lib/screens/grupo_detalles/grupo_detalle_screen.dart:630-649`.
 
-### ~~15. Habia `setState` despues de operaciones asincronas sin comprobar `mounted`~~
+`Pagos que te han marcado` incluye todas las divisiones pagadas a favor del usuario, sin comprobar `pagoRegistradoPor`. Si el acreedor registró el cobro de alguien sin app, la interfaz afirma igualmente que esa persona indicó que pagó.
 
-**Resuelto en los flujos detectados.** Las operaciones modificadas comprueban `mounted` antes de actualizar la interfaz.
+**Solución lógica:** distinguir quién cerró la deuda. La revisión y reapertura por pago declarado debe mostrarse para confirmaciones del deudor; un cobro registrado por el acreedor necesita otro texto o no debe entrar en esa lista.
 
-### ~~16. Las recurrencias calculaban mal los finales de mes~~
+### 12. La configuración de notificaciones no es coherente
 
-**Resuelto.** Las frecuencias mensuales, trimestrales y anuales usan el ultimo dia valido del mes de destino.
+**Dónde:** `ios/Runner/Info.plist:49-53`, `android/app/src/main/AndroidManifest.xml:30-32` y `lib/app.dart:30-49`.
 
-### ~~17. Un token invalido podia detener todos los recordatorios~~
+iOS declara el modo de notificaciones remotas, pero el proyecto no contiene entitlements con la capacidad Push Notifications. En Android, el manifiesto indica `default_channel`, mientras las notificaciones en primer plano usan `canal_notificaciones`, y no se crea un canal común explícitamente.
 
-**Resuelto.** Los tokens invalidos se eliminan y el procesamiento continua con el resto de usuarios.
+**Solución lógica:** completar la capacidad push de iOS y verificar APNs en un dispositivo real. En Android se debe crear un único canal estable y usar su ID en el manifiesto y en las notificaciones locales.
 
-### ~~18. Las Functions ocultaban errores y no reintentaban~~
+### 13. Los reintentos de recordatorios repiten también los envíos correctos
 
-**Resuelto.** La recurrencia es idempotente y tiene tres reintentos. Los recordatorios tienen dos reintentos para limitar duplicados. Los cambios de estado de las deudas tambien habilitan reintentos.
+**Dónde:** `functions/index.js:310-318` y `functions/index.js:397-432`.
 
-### ~~20. El codigo de grupo y el bloqueo se protegian solo en cliente~~
+Si un envío falla, la Function termina con error y el reintento recorre el lote completo. Quienes ya recibieron el aviso pueden recibirlo otra vez. Esto respeta la decisión de priorizar que no falten recordatorios, pero no distingue qué destinatario falló.
 
-**Resuelto.** Crear y unirse a grupos pasa por Callables. Los codigos se generan criptograficamente y el limite de intentos se persiste en servidor.
+**Solución lógica:** conservar los reintentos, pero identificar cada recordatorio por usuario y periodo para omitir los envíos ya registrados como correctos.
 
-### ~~21. El token FCM completo aparecia en los logs~~
+## Prioridad baja o trabajo posterior
 
-**Resuelto.** Los logs usan identificadores internos y no imprimen el token.
+### 14. Algunas cargas pueden quedarse sin recuperación visible
 
-### ~~22. Un error al cargar el detalle dejaba un spinner permanente~~
+**Dónde:** `lib/screens/home/main_screen.dart:105-120` y `lib/screens/crear_gasto/crear_gasto.dart:52-70`.
 
-**Resuelto.** El `FutureBuilder` muestra un estado de error explicito.
+Si falla `loadGroups`, `deviceId` no se asigna y la pantalla mantiene el indicador de carga. Si falla la carga de miembros al crear un gasto, el formulario queda vacío sin explicar el error ni ofrecer reintento.
 
-### ~~25. El SDK declarado no reproducia el lockfile~~
+**Solución lógica:** representar explícitamente `cargando`, `error` y `contenido`, con una acción de reintento.
 
-**Resuelto.** `pubspec.yaml` declara Dart 3.8 y Flutter 3.27.4 como minimos coherentes con el lockfile actual.
+### 15. El arranque depende de permisos y servicios no esenciales
 
-### ~~26. El minimo de iOS diferia entre CocoaPods y Xcode~~
+**Dónde:** `lib/main.dart:13-27` y `lib/main.dart:51-83`.
 
-**Resuelto.** Ambos usan iOS 13.
+Antes de mostrar la interfaz se esperan Firebase, el login, la inicialización de notificaciones y sus permisos. Un fallo de notificaciones puede impedir abrir funciones que no las necesitan y los permisos se solicitan sin contexto nada más iniciar.
 
-## Problemas de prioridad baja o pospuestos
+**Solución lógica:** bloquear el arranque solo por los servicios imprescindibles. Las notificaciones deben inicializarse con manejo de error y solicitarse cuando el usuario entienda su utilidad.
 
-### ~~Pruebas basicas de permisos de Firestore pendientes~~
+### 16. Dependencias pendientes
 
-**Resuelto.** `npm run test:rules` levanta un proyecto de emulador aislado y ejecuta cinco comprobaciones sencillas: lectura del grupo, pago por el deudor, cobro por el acreedor, rechazo de un tercero y reapertura por el acreedor.
+`flutter pub outdated` muestra varias versiones principales posteriores. `npm audit --omit=dev` informa de dos vulnerabilidades moderadas transitivas relacionadas con `uuid` y `gaxios`.
 
-### 23. Firebase no esta configurado para web y escritorio
+**Decisión recomendada:** no hacer una actualización masiva mientras se corrigen los contratos anteriores. Actualizar por bloques y ejecutar las pruebas tras cada bloque.
 
-Las carpetas de plataforma existen, pero Firebase solo esta configurado para Android e iOS.
+### 17. Configuración de publicación y plataformas fuera del alcance actual
 
-**Decision actual:** mantener esas plataformas fuera del alcance hasta decidir si PayB2 dejara de ser exclusivamente movil.
+Android e iOS conservan identificadores `com.example.payb2`, Android usa firma de desarrollo y Firebase no está configurado para web o escritorio. Son tareas necesarias antes de publicar o ampliar plataformas, pero no bloquean el trabajo funcional móvil actual.
 
-### 24. Identificadores y firma de desarrollo
+## Ambigüedad funcional pendiente
 
-Android e iOS conservan identificadores de ejemplo y Android usa firma de desarrollo.
+La pestaña `Saldos` suma la deuda bruta de cada miembro frente a todos los acreedores (`grupo_detalle_screen.dart:603-610`). No compensa deudas opuestas. Antes de cambiarla hay que decidir si representa deuda bruta o saldo neto; ambos modelos son válidos, pero el nombre debe dejarlo claro. En ambos casos, el cálculo debe usar `cantidadCentimos` como fuente única.
 
-**Decision actual:** resolverlo en la fase de publicacion, no durante la consolidacion funcional.
+## Huecos de prueba relevantes
 
-### ~~27. El unico test automatico era el contador roto de Flutter~~
+- Rechazar con reglas una segunda identidad para el mismo UID.
+- Comprobar solicitudes inválidas y creación atómica de gastos y programaciones desde la Callable, incluyendo el límite de 50 miembros.
+- Probar una serie completa: 31 de enero, febrero y 31 de marzo; también el 29 de febrero al siguiente año bisiesto.
+- Probar doble envío e idempotencia en gasto, recurrencia y grupo.
+- Probar varias ocurrencias vencidas y la política elegida para recuperarlas.
+- Probar dos clientes simultáneos para pagos, reaperturas y refresco de vistas.
 
-**Resuelto.** El test de plantilla fue sustituido. Actualmente pasan 8 pruebas Flutter, 9 pruebas de Functions y 5 pruebas de reglas sobre los permisos esenciales.
+## Verificación de esta revisión
 
-### ~~28. La compilacion Android estaba bloqueada por cuarentena~~
-
-**Resuelto.** Se retiro la marca local de cuarentena de `android/gradlew` y el APK debug se genera correctamente.
-
-### ~~30. El README tenia bloques Markdown incompletos~~
-
-**Resuelto.** Los bloques de comandos y el paso de configuracion Firebase estan corregidos.
-
-### ~~31. El runtime y el lock de Functions estaban desalineados~~
-
-**Resuelto.** Functions declara Node 20, existe `.nvmrc`, el lockfile fue regenerado y las pruebas se ejecutaron con Node 20.
-
-### ~~32. Habia archivos, dependencias y codigo duplicado sin uso~~
-
-**Resuelto.** Se eliminaron la instancia duplicada de notificaciones, el tema vacio, `device_info_plus` y el lock npm raiz sin proyecto asociado.
-
-### ~~33. Quedaban dos avisos del analizador~~
-
-**Resuelto.** `flutter analyze` termina sin diagnosticos.
-
-## Flujo de pagos consolidado
-
-- Quien crea un gasto es quien adelanto el importe y queda registrado como acreedor.
-- Cada division conserva siempre su importe original.
-- El deudor puede marcar su propia parte como pagada.
-- El acreedor puede registrar como cobradas exclusivamente las deudas que se le deben, aunque el miembro nunca instale la aplicacion.
-- Se guarda `pagoRegistradoPor` para distinguir quien cerro la deuda.
-- Si el deudor confirma el pago, se notifica al acreedor.
-- Si el acreedor registra directamente el cobro, no recibe una notificacion redundante.
-- El acreedor puede reabrir un pago no recibido; si el deudor tiene cuenta, vuelve a recibir la notificacion.
-
-## Verificacion actual
-
-- `flutter analyze`: sin diagnosticos.
+- `flutter analyze`: sin diagnósticos.
 - `flutter test`: 8 pruebas superadas.
-- Tests de Functions con Node 20: 9 pruebas superadas.
-- Reglas de Firestore: 5 pruebas de permisos superadas en el emulador.
-- Configuracion de reintentos de Functions: comprobada al cargar los triggers.
-- Android: APK debug generado correctamente.
-- iOS: resolucion de pods correcta; compilacion bloqueada por falta de plataforma de simulador en Xcode.
+- Tests unitarios de Functions con Node 22: 9 pruebas superadas.
+- Tests de los seis handlers de Functions con Firestore emulado: 10 pruebas superadas; FCM está simulado.
+- Reglas de Firestore en emulador: 7 pruebas superadas.
+- El emulador de Functions carga los cinco exports con Node 22.
 - `npm audit --omit=dev`: 2 vulnerabilidades moderadas transitivas.
 
-## Orden de trabajo restante
-
-1. Validar notificaciones y flujo de pagos en dispositivos Android e iOS.
-2. Revisar dependencias por bloques, sin actualizaciones masivas.
-3. Evaluar el coste de las consultas solo cuando exista una escala de uso representativa.
-4. Dejar identificadores, firma y preparacion de tiendas para la futura fase de publicacion.
+Las pruebas actuales confirman el reparto básico, la creación atómica del gasto, los permisos de pago y la ejecución local de los handlers. No cubren todavía FCM/APNs reales, los disparos programados en Firebase ni la concurrencia descrita arriba.

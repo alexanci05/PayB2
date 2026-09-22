@@ -10,11 +10,13 @@ const {
 } = require('@firebase/rules-unit-testing');
 const {
   deleteField,
+  deleteDoc,
   doc,
   getDoc,
   serverTimestamp,
   setDoc,
   updateDoc,
+  writeBatch,
 } = require('firebase/firestore');
 
 let testEnv;
@@ -96,6 +98,33 @@ test('un miembro puede leer su grupo y un usuario ajeno no', async () => {
 
   await assertSucceeds(getDoc(doc(memberDb, 'groups/group-1')));
   await assertFails(getDoc(doc(outsiderDb, 'groups/group-1')));
+});
+
+test('un cliente no puede crear gastos, divisiones ni programaciones directamente', async () => {
+  const db = testEnv.authenticatedContext('creditor-uid').firestore();
+  await assertFails(setDoc(doc(db, 'groups/group-1/gastos/otro'), {
+    nombre: 'Manipulado', cantidadCentimos: 3000, pagadoPor: 'creditor',
+    createdByMemberId: 'creditor', createdByUid: 'creditor-uid', fecha: new Date(),
+  }));
+  await assertFails(setDoc(doc(db, 'groups/group-1/gastos/expense-1/divisiones/other'), {
+    memberId: 'other', groupId: 'group-1', cantidadCentimos: 50000,
+    pagadoPor: 'creditor', pagado: false,
+  }));
+  await assertFails(setDoc(doc(db, 'groups/group-1/gastosProgramados/otro'), {
+    nombre: 'Manipulado', cantidadCentimos: 3000, pagadoPor: 'creditor',
+    participantes: ['debtor'], frecuencia: null, proximaFecha: new Date(),
+    createdByMemberId: 'creditor', createdByUid: 'creditor-uid',
+  }));
+});
+
+test('una division solo se elimina junto con su gasto', async () => {
+  const db = testEnv.authenticatedContext('creditor-uid').firestore();
+  await assertFails(deleteDoc(debtRef(db)));
+
+  const batch = writeBatch(db);
+  batch.delete(debtRef(db));
+  batch.delete(doc(db, 'groups/group-1/gastos/expense-1'));
+  await assertSucceeds(batch.commit());
 });
 
 test('el deudor puede marcar su propia deuda como pagada', async () => {

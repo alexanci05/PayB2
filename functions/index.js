@@ -1,9 +1,12 @@
 const functions = require('firebase-functions/v1');
-const admin = require('firebase-admin');
+const { initializeApp } = require('firebase-admin/app');
+const { getFirestore, FieldValue, Timestamp } = require('firebase-admin/firestore');
+const { getMessaging } = require('firebase-admin/messaging');
 const { randomInt } = require('node:crypto');
-admin.initializeApp();
+initializeApp();
 
-const { Timestamp } = require("firebase-admin/firestore");
+const db = getFirestore();
+const messaging = getMessaging();
 const {
   centsFromAmount,
   splitCents,
@@ -35,7 +38,6 @@ exports.crearGrupo = functions.https.onCall(async (data, context) => {
     throw new functions.https.HttpsError("invalid-argument", "La lista de miembros no es válida");
   }
 
-  const db = admin.firestore();
   const uid = context.auth.uid;
   const groupRef = db.collection("groups").doc();
 
@@ -48,18 +50,18 @@ exports.crearGrupo = functions.https.onCall(async (data, context) => {
 
       transaction.create(codeRef, {
         groupId: groupRef.id,
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        createdAt: FieldValue.serverTimestamp(),
       });
       transaction.create(groupRef, {
         name: nombre,
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        createdAt: FieldValue.serverTimestamp(),
         groupCode,
         ownerDeviceId: uid,
       });
       transaction.create(db.collection("groupMembers").doc(`${groupRef.id}_${uid}`), {
         groupId: groupRef.id,
         deviceId: uid,
-        joinedAt: admin.firestore.FieldValue.serverTimestamp(),
+        joinedAt: FieldValue.serverTimestamp(),
       });
       memberNames.forEach((memberName, index) => {
         const memberId = `member_${String(index + 1).padStart(3, "0")}`;
@@ -82,6 +84,101 @@ function createGroupCode() {
   return Array.from({ length: 8 }, () => chars[randomInt(chars.length)]).join("");
 }
 
+exports.crearGasto = functions.https.onCall(async (data, context) => {
+  if (!context.auth) {
+    throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesión');
+  }
+
+  const { groupId, nombre, descripcion, cantidadCentimos, fecha, pagadoPor, participantes, frecuencia } = data || {};
+  const validId = (id) => typeof id === 'string' && id.length > 0 && id.length <= 1500 && !id.includes('/');
+  if (!validId(groupId) || !validId(pagadoPor) || typeof nombre !== 'string' ||
+      !nombre.trim() || nombre.trim().length > 100 || typeof descripcion !== 'string' ||
+      !Number.isSafeInteger(cantidadCentimos) || cantidadCentimos <= 0 ||
+      !Array.isArray(participantes) || participantes.length < 1 || participantes.length > 49 ||
+      participantes.some((id) => !validId(id) || id === pagadoPor) ||
+      new Set(participantes).size !== participantes.length ||
+      cantidadCentimos < participantes.length + 1 ||
+      (frecuencia !== null && frecuencia !== undefined && typeof frecuencia !== 'string')) {
+    throw new functions.https.HttpsError('invalid-argument', 'Los datos del gasto no son válidos');
+  }
+
+  if (typeof fecha !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(fecha)) {
+    throw new functions.https.HttpsError('invalid-argument', 'La fecha no es válida');
+  }
+  const expenseDate = new Date(`${fecha}T12:00:00.000Z`);
+  if (Number.isNaN(expenseDate.getTime()) || expenseDate.toISOString().slice(0, 10) !== fecha) {
+    throw new functions.https.HttpsError('invalid-argument', 'La fecha no es válida');
+  }
+  if (frecuencia != null) {
+    try {
+      nextScheduledDate(expenseDate, frecuencia);
+    } catch (_) {
+      throw new functions.https.HttpsError('invalid-argument', 'La frecuencia no es válida');
+    }
+  }
+
+  const dateParts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Europe/Madrid', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(new Date());
+  const part = (type) => dateParts.find((entry) => entry.type === type).value;
+  const today = `${part('year')}-${part('month')}-${part('day')}`;
+  const isFuture = fecha > today;
+  const groupRef = db.collection('groups').doc(groupId);
+  const scheduleRef = (isFuture || frecuencia != null) ? groupRef.collection('gastosProgramados').doc() : null;
+  const occurrenceRef = isFuture ? null : scheduleRef
+    ? groupRef.collection('gastos').doc(scheduledOccurrenceId(scheduleRef.id, expenseDate))
+    : groupRef.collection('gastos').doc();
+  const shares = splitCents(cantidadCentimos, pagadoPor, participantes);
+  const expenseTimestamp = Timestamp.fromDate(expenseDate);
+  const uid = context.auth.uid;
+
+  await db.runTransaction(async (transaction) => {
+    const membershipRef = db.collection('groupMembers').doc(`${groupId}_${uid}`);
+    const memberRefs = shares.map((share) => groupRef.collection('members').doc(share.memberId));
+    const [groupSnap, membershipSnap, ...memberSnaps] = await transaction.getAll(
+      groupRef, membershipRef, ...memberRefs,
+    );
+    if (!groupSnap.exists || !membershipSnap.exists ||
+        membershipSnap.get('groupId') !== groupId || membershipSnap.get('deviceId') !== uid ||
+        memberSnaps.some((snapshot) => !snapshot.exists) ||
+        memberSnaps.find((snapshot) => snapshot.id === pagadoPor).get('reclamadoPor') !== uid) {
+      throw new functions.https.HttpsError('permission-denied', 'No puedes crear este gasto para este grupo');
+    }
+
+    if (scheduleRef) {
+      transaction.create(scheduleRef, {
+        nombre: nombre.trim(), descripcion: descripcion.trim(),
+        cantidad: cantidadCentimos / 100, cantidadCentimos, pagadoPor,
+        participantes: [...participantes].sort(), frecuencia: frecuencia ?? null,
+        proximaFecha: isFuture ? expenseTimestamp : Timestamp.fromDate(nextScheduledDate(expenseDate, frecuencia)),
+        created: FieldValue.serverTimestamp(), createdByMemberId: pagadoPor, createdByUid: uid,
+      });
+    }
+
+    if (occurrenceRef) {
+      transaction.create(occurrenceRef, {
+        nombre: nombre.trim(), descripcion: descripcion.trim(),
+        cantidad: cantidadCentimos / 100, cantidadCentimos, fecha: expenseTimestamp,
+        created: FieldValue.serverTimestamp(), pagadoPor,
+        scheduleId: scheduleRef?.id ?? null,
+        occurrenceKey: scheduleRef ? occurrenceRef.id : null,
+        createdByMemberId: pagadoPor, createdByUid: uid,
+      });
+      for (const share of shares) {
+        transaction.create(occurrenceRef.collection('divisiones').doc(divisionId(share.memberId)), {
+          memberId: share.memberId, groupId, cantidad: share.cantidad,
+          cantidadCentimos: share.cantidadCentimos, pagado: share.memberId === pagadoPor,
+          pagadoEn: share.memberId === pagadoPor ? expenseTimestamp : null,
+          created: FieldValue.serverTimestamp(), fecha: expenseTimestamp,
+          nombre: nombre.trim(), pagadoPor,
+        });
+      }
+    }
+  });
+
+  return { gastoId: occurrenceRef?.id ?? null, scheduleId: scheduleRef?.id ?? null };
+});
+
 exports.unirseAGrupo = functions.https.onCall(async (data, context) => {
   if (!context.auth) {
     throw new functions.https.HttpsError("unauthenticated", "Debes iniciar sesión");
@@ -92,7 +189,6 @@ exports.unirseAGrupo = functions.https.onCall(async (data, context) => {
     throw new functions.https.HttpsError("invalid-argument", "El código no es válido");
   }
 
-  const db = admin.firestore();
   const uid = context.auth.uid;
   const attemptsRef = db.collection("joinAttempts").doc(uid);
   const result = await db.runTransaction(async (transaction) => {
@@ -134,7 +230,7 @@ exports.unirseAGrupo = functions.https.onCall(async (data, context) => {
       transaction.create(membershipRef, {
         groupId,
         deviceId: uid,
-        joinedAt: admin.firestore.FieldValue.serverTimestamp(),
+        joinedAt: FieldValue.serverTimestamp(),
       });
     }
     transaction.delete(attemptsRef);
@@ -193,7 +289,6 @@ exports.ejecutarGastosPeriodicos = functions.pubsub
   .timeZone("Europe/Madrid")
   .onRun(async (context) => {
     const hoy = Timestamp.now();
-    const db = admin.firestore();
     console.log(`--- Ejecutando Gastos Periódicos - Hoy: ${hoy.toDate().toISOString()} ---`);
 
     try {
@@ -273,7 +368,7 @@ async function generarOcurrenciaProgramada({ db, groupId, scheduleRef, now }) {
         cantidad: totalCents / 100,
         cantidadCentimos: totalCents,
         fecha: scheduledAt,
-        created: admin.firestore.FieldValue.serverTimestamp(),
+        created: FieldValue.serverTimestamp(),
         pagadoPor: schedule.pagadoPor,
         scheduleId: scheduleRef.id,
         occurrenceKey: occurrenceId,
@@ -289,7 +384,7 @@ async function generarOcurrenciaProgramada({ db, groupId, scheduleRef, now }) {
           cantidadCentimos: share.cantidadCentimos,
           pagado: share.memberId === schedule.pagadoPor,
           ...(share.memberId === schedule.pagadoPor ? { pagadoEn: scheduledAt } : {}),
-          created: admin.firestore.FieldValue.serverTimestamp(),
+          created: FieldValue.serverTimestamp(),
           fecha: scheduledAt,
           nombre: schedule.nombre,
           pagadoPor: schedule.pagadoPor,
@@ -322,7 +417,7 @@ exports.recordatorioDeudas = functions.pubsub
       const deliveryFailures = [];
 
       // 1. Leer TODOS los usuarios
-      const usuariosSnap = await admin.firestore()
+      const usuariosSnap = await db
         .collection("usuarios")
         .get();
 
@@ -338,7 +433,7 @@ exports.recordatorioDeudas = functions.pubsub
         }
 
         // 2. Buscar todos los groupIds donde esté
-        const memberSnap = await admin.firestore()
+        const memberSnap = await db
           .collection("groupMembers")
           .where("deviceId", "==", deviceId)
           .get();
@@ -351,7 +446,7 @@ exports.recordatorioDeudas = functions.pubsub
         // 3. Para cada grupo, buscar gastos y divisiones
         for (const gid of groupIds) {
           // a) Buscar miembros del grupo
-          const membersSnap = await admin.firestore()
+          const membersSnap = await db
             .collection("groups").doc(gid)
             .collection("members")
             .get();
@@ -367,7 +462,7 @@ exports.recordatorioDeudas = functions.pubsub
           const phantomId = phantomSnap.id;
 
           // b) Buscar todos los gastos
-          const gastosSnap = await admin.firestore()
+          const gastosSnap = await db
             .collection("groups").doc(gid)
             .collection("gastos")
             .get();
@@ -397,7 +492,7 @@ exports.recordatorioDeudas = functions.pubsub
         // 4. Si tiene deudas → enviar notificación
         if (tieneDeudaPendiente) {
           try {
-            await admin.messaging().send({
+            await messaging.send({
               token: token,
               notification: {
                 title: "Recordatorio de deudas",
@@ -408,8 +503,8 @@ exports.recordatorioDeudas = functions.pubsub
           } catch (error) {
             if (isInvalidMessagingToken(error)) {
               await usuarioDoc.ref.update({
-                fcmToken: admin.firestore.FieldValue.delete(),
-                tokenInvalidatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                fcmToken: FieldValue.delete(),
+                tokenInvalidatedAt: FieldValue.serverTimestamp(),
               });
               console.warn(`Token FCM inválido eliminado para ${deviceId}`);
             } else {
@@ -440,7 +535,7 @@ exports.recordatorioDeudas = functions.pubsub
 );
 
 async function sendNotificationToMember({ groupId, memberId, title, body }) {
-  const memberDoc = await admin.firestore()
+  const memberDoc = await db
     .collection('groups')
     .doc(groupId)
     .collection('members')
@@ -458,7 +553,7 @@ async function sendNotificationToMember({ groupId, memberId, title, body }) {
     return;
   }
 
-  const userRef = admin.firestore().collection('usuarios').doc(uid);
+  const userRef = db.collection('usuarios').doc(uid);
   const userDoc = await userRef.get();
   const token = userDoc.get('fcmToken');
   if (!token) {
@@ -467,13 +562,13 @@ async function sendNotificationToMember({ groupId, memberId, title, body }) {
   }
 
   try {
-    await admin.messaging().send({ token, notification: { title, body } });
+    await messaging.send({ token, notification: { title, body } });
     console.log(`Notificación de deuda enviada al usuario ${uid}`);
   } catch (error) {
     if (!isInvalidMessagingToken(error)) throw error;
     await userRef.update({
-      fcmToken: admin.firestore.FieldValue.delete(),
-      tokenInvalidatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      fcmToken: FieldValue.delete(),
+      tokenInvalidatedAt: FieldValue.serverTimestamp(),
     });
     console.warn(`Token FCM inválido eliminado para ${uid}`);
   }
