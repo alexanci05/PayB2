@@ -2,7 +2,7 @@ const functions = require('firebase-functions/v1');
 const { initializeApp } = require('firebase-admin/app');
 const { getFirestore, FieldValue, Timestamp } = require('firebase-admin/firestore');
 const { getMessaging } = require('firebase-admin/messaging');
-const { randomInt } = require('node:crypto');
+const { createHash, randomInt } = require('node:crypto');
 initializeApp();
 
 const db = getFirestore();
@@ -15,6 +15,7 @@ const {
   divisionId,
 } = require('./lib/scheduled-occurrences');
 const { debtNotificationForTransition } = require('./lib/debt-notifications');
+const MAX_OCCURRENCES_PER_SCHEDULE_RUN = 100;
 
 exports.crearGrupo = functions.https.onCall(async (data, context) => {
   if (!context.auth) {
@@ -26,6 +27,7 @@ exports.crearGrupo = functions.https.onCall(async (data, context) => {
     ? data.miembros.map((name) => typeof name === "string" ? name.trim() : "")
     : [];
   const uniqueNames = new Set(memberNames.map((name) => name.toLocaleLowerCase("es")));
+  const requestId = data?.requestId;
   if (!nombre || nombre.length > 80) {
     throw new functions.https.HttpsError("invalid-argument", "El nombre del grupo no es válido");
   }
@@ -33,20 +35,36 @@ exports.crearGrupo = functions.https.onCall(async (data, context) => {
     memberNames.length === 0 ||
     memberNames.length > 50 ||
     memberNames.some((name) => !name || name.length > 50) ||
-    uniqueNames.size !== memberNames.length
+    uniqueNames.size !== memberNames.length ||
+    typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{20}$/.test(requestId)
   ) {
     throw new functions.https.HttpsError("invalid-argument", "La lista de miembros no es válida");
   }
 
   const uid = context.auth.uid;
   const groupRef = db.collection("groups").doc();
+  const requestRef = db.collection('groupCreationRequests').doc(`${uid}_${requestId}`);
+  const fingerprint = createHash('sha256').update(JSON.stringify([uid, nombre, memberNames])).digest('hex');
 
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const groupCode = createGroupCode();
-    const reserved = await db.runTransaction(async (transaction) => {
+    const result = await db.runTransaction(async (transaction) => {
+      const requestSnap = await transaction.get(requestRef);
+      if (requestSnap.exists) {
+        if (requestSnap.get('fingerprint') !== fingerprint) {
+          throw new functions.https.HttpsError('failed-precondition', 'Esta solicitud ya se usó para otro grupo');
+        }
+        return { groupId: requestSnap.get('groupId'), groupCode: requestSnap.get('groupCode') };
+      }
+
       const codeRef = db.collection("groupCodes").doc(groupCode);
       const codeSnapshot = await transaction.get(codeRef);
-      if (codeSnapshot.exists) return false;
+      if (codeSnapshot.exists) return null;
+
+      transaction.create(requestRef, {
+        groupId: groupRef.id, groupCode, fingerprint,
+        createdByUid: uid, createdAt: FieldValue.serverTimestamp(),
+      });
 
       transaction.create(codeRef, {
         groupId: groupRef.id,
@@ -70,10 +88,10 @@ exports.crearGrupo = functions.https.onCall(async (data, context) => {
           reclamadoPor: null,
         });
       });
-      return true;
+      return { groupId: groupRef.id, groupCode };
     });
 
-    if (reserved) return { groupId: groupRef.id, groupCode };
+    if (result) return result;
   }
 
   throw new functions.https.HttpsError("aborted", "No se pudo reservar un código de grupo");
@@ -84,20 +102,70 @@ function createGroupCode() {
   return Array.from({ length: 8 }, () => chars[randomInt(chars.length)]).join("");
 }
 
+exports.reclamarMiembro = functions.https.onCall(async (data, context) => {
+  if (!context.auth) {
+    throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesión');
+  }
+
+  const { groupId, memberId } = data || {};
+  const validId = (id) => typeof id === 'string' && id.length > 0 && id.length <= 1500 && !id.includes('/');
+  if (!validId(groupId) || !validId(memberId)) {
+    throw new functions.https.HttpsError('invalid-argument', 'El grupo o la identidad no son válidos');
+  }
+
+  const uid = context.auth.uid;
+  const groupRef = db.collection('groups').doc(groupId);
+  const membershipRef = db.collection('groupMembers').doc(`${groupId}_${uid}`);
+  const memberRef = groupRef.collection('members').doc(memberId);
+  return db.runTransaction(async (transaction) => {
+    const [groupSnap, membershipSnap, memberSnap] = await transaction.getAll(
+      groupRef, membershipRef, memberRef,
+    );
+    if (!groupSnap.exists || !membershipSnap.exists ||
+        membershipSnap.get('groupId') !== groupId || membershipSnap.get('deviceId') !== uid) {
+      throw new functions.https.HttpsError('permission-denied', 'No perteneces a este grupo');
+    }
+
+    const claimedQuery = groupRef.collection('members').where('reclamadoPor', '==', uid).limit(1);
+    const alreadyClaimed = await transaction.get(claimedQuery);
+    if (!alreadyClaimed.empty) {
+      const existingId = alreadyClaimed.docs[0].id;
+      if (membershipSnap.get('memberId') !== existingId) {
+        transaction.update(membershipRef, { memberId: existingId });
+      }
+      return { memberId: existingId };
+    }
+    if (!memberSnap.exists || memberSnap.get('reclamadoPor') != null) {
+      throw new functions.https.HttpsError('failed-precondition', 'Esa identidad ya no está disponible');
+    }
+
+    transaction.update(memberRef, { reclamadoPor: uid });
+    transaction.update(membershipRef, { memberId });
+    return { memberId };
+  });
+});
+
 exports.crearGasto = functions.https.onCall(async (data, context) => {
   if (!context.auth) {
     throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesión');
   }
 
-  const { groupId, nombre, descripcion, cantidadCentimos, fecha, pagadoPor, participantes, frecuencia } = data || {};
+  const {
+    groupId, nombre, descripcion, cantidadCentimos, fecha, pagadoPor,
+    participantes, frecuencia, requestId, timeZoneOffsetMinutes,
+  } = data || {};
   const validId = (id) => typeof id === 'string' && id.length > 0 && id.length <= 1500 && !id.includes('/');
-  if (!validId(groupId) || !validId(pagadoPor) || typeof nombre !== 'string' ||
+  if (!validId(groupId) || !validId(pagadoPor) ||
+      typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{20}$/.test(requestId) ||
+      typeof nombre !== 'string' ||
       !nombre.trim() || nombre.trim().length > 100 || typeof descripcion !== 'string' ||
       !Number.isSafeInteger(cantidadCentimos) || cantidadCentimos <= 0 ||
       !Array.isArray(participantes) || participantes.length < 1 || participantes.length > 49 ||
       participantes.some((id) => !validId(id) || id === pagadoPor) ||
       new Set(participantes).size !== participantes.length ||
       cantidadCentimos < participantes.length + 1 ||
+      !Number.isInteger(timeZoneOffsetMinutes) ||
+      timeZoneOffsetMinutes < -14 * 60 || timeZoneOffsetMinutes > 14 * 60 ||
       (frecuencia !== null && frecuencia !== undefined && typeof frecuencia !== 'string')) {
     throw new functions.https.HttpsError('invalid-argument', 'Los datos del gasto no son válidos');
   }
@@ -117,11 +185,8 @@ exports.crearGasto = functions.https.onCall(async (data, context) => {
     }
   }
 
-  const dateParts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'Europe/Madrid', year: 'numeric', month: '2-digit', day: '2-digit',
-  }).formatToParts(new Date());
-  const part = (type) => dateParts.find((entry) => entry.type === type).value;
-  const today = `${part('year')}-${part('month')}-${part('day')}`;
+  const clientNow = new Date(Date.now() + timeZoneOffsetMinutes * 60 * 1000);
+  const today = clientNow.toISOString().slice(0, 10);
   const isFuture = fecha > today;
   const groupRef = db.collection('groups').doc(groupId);
   const scheduleRef = (isFuture || frecuencia != null) ? groupRef.collection('gastosProgramados').doc() : null;
@@ -131,8 +196,21 @@ exports.crearGasto = functions.https.onCall(async (data, context) => {
   const shares = splitCents(cantidadCentimos, pagadoPor, participantes);
   const expenseTimestamp = Timestamp.fromDate(expenseDate);
   const uid = context.auth.uid;
+  const requestRef = groupRef.collection('expenseRequests').doc(requestId);
+  const fingerprint = createHash('sha256').update(JSON.stringify([
+    uid, nombre.trim(), descripcion.trim(), cantidadCentimos, fecha,
+    pagadoPor, [...participantes].sort(), frecuencia ?? null, timeZoneOffsetMinutes,
+  ])).digest('hex');
 
-  await db.runTransaction(async (transaction) => {
+  return db.runTransaction(async (transaction) => {
+    const requestSnap = await transaction.get(requestRef);
+    if (requestSnap.exists) {
+      if (requestSnap.get('fingerprint') !== fingerprint || requestSnap.get('createdByUid') !== uid) {
+        throw new functions.https.HttpsError('failed-precondition', 'Esta solicitud ya se usó para otro gasto');
+      }
+      return { gastoId: requestSnap.get('gastoId'), scheduleId: requestSnap.get('scheduleId') };
+    }
+
     const membershipRef = db.collection('groupMembers').doc(`${groupId}_${uid}`);
     const memberRefs = shares.map((share) => groupRef.collection('members').doc(share.memberId));
     const [groupSnap, membershipSnap, ...memberSnaps] = await transaction.getAll(
@@ -150,6 +228,7 @@ exports.crearGasto = functions.https.onCall(async (data, context) => {
         nombre: nombre.trim(), descripcion: descripcion.trim(),
         cantidad: cantidadCentimos / 100, cantidadCentimos, pagadoPor,
         participantes: [...participantes].sort(), frecuencia: frecuencia ?? null,
+        diaAncla: frecuencia == null ? null : expenseDate.getUTCDate(),
         proximaFecha: isFuture ? expenseTimestamp : Timestamp.fromDate(nextScheduledDate(expenseDate, frecuencia)),
         created: FieldValue.serverTimestamp(), createdByMemberId: pagadoPor, createdByUid: uid,
       });
@@ -174,9 +253,51 @@ exports.crearGasto = functions.https.onCall(async (data, context) => {
         });
       }
     }
+    const result = { gastoId: occurrenceRef?.id ?? null, scheduleId: scheduleRef?.id ?? null };
+    transaction.create(requestRef, {
+      ...result, fingerprint, createdByUid: uid, created: FieldValue.serverTimestamp(),
+    });
+    return result;
   });
+});
 
-  return { gastoId: occurrenceRef?.id ?? null, scheduleId: scheduleRef?.id ?? null };
+exports.eliminarGasto = functions.https.onCall(async (data, context) => {
+  if (!context.auth) {
+    throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesión');
+  }
+
+  const { groupId, gastoId, eliminarSerie } = data || {};
+  const validId = (id) => typeof id === 'string' && id.length > 0 && id.length <= 1500 && !id.includes('/');
+  if (!validId(groupId) || !validId(gastoId) || typeof eliminarSerie !== 'boolean') {
+    throw new functions.https.HttpsError('invalid-argument', 'Los datos del borrado no son válidos');
+  }
+
+  const uid = context.auth.uid;
+  const groupRef = db.collection('groups').doc(groupId);
+  const expenseRef = groupRef.collection('gastos').doc(gastoId);
+  return db.runTransaction(async (transaction) => {
+    const [groupSnap, expenseSnap, divisionsSnap] = await Promise.all([
+      transaction.get(groupRef),
+      transaction.get(expenseRef),
+      transaction.get(expenseRef.collection('divisiones')),
+    ]);
+    if (!expenseSnap.exists) return { deleted: false };
+    if (!groupSnap.exists ||
+        (groupSnap.get('ownerDeviceId') !== uid && expenseSnap.get('createdByUid') !== uid)) {
+      throw new functions.https.HttpsError('permission-denied', 'No puedes eliminar este gasto');
+    }
+
+    const scheduleId = expenseSnap.get('scheduleId');
+    if (eliminarSerie && scheduleId != null) {
+      if (!validId(scheduleId)) {
+        throw new functions.https.HttpsError('failed-precondition', 'La programación asociada no es válida');
+      }
+      transaction.delete(groupRef.collection('gastosProgramados').doc(scheduleId));
+    }
+    for (const division of divisionsSnap.docs) transaction.delete(division.ref);
+    transaction.delete(expenseRef);
+    return { deleted: true };
+  });
 });
 
 exports.unirseAGrupo = functions.https.onCall(async (data, context) => {
@@ -309,14 +430,18 @@ exports.ejecutarGastosPeriodicos = functions.pubsub
 
         for (const gastoProgramadoDoc of gastosProgramadosSnap.docs) {
           try {
-            const result = await generarOcurrenciaProgramada({
-              db,
-              groupId,
-              scheduleRef: gastoProgramadoDoc.ref,
-              now: hoy,
-            });
-            if (result) {
-              console.log(`Gasto programado ${gastoProgramadoDoc.id} en grupo ${groupId}: ${result}`);
+            for (let generated = 0; generated < MAX_OCCURRENCES_PER_SCHEDULE_RUN; generated += 1) {
+              const result = await generarOcurrenciaProgramada({
+                db,
+                groupId,
+                scheduleRef: gastoProgramadoDoc.ref,
+                now: hoy,
+              });
+              console.log(`Gasto programado ${gastoProgramadoDoc.id} en grupo ${groupId}: ${result.message}`);
+              if (!result.hasAnotherDueOccurrence) break;
+              if (generated === MAX_OCCURRENCES_PER_SCHEDULE_RUN - 1) {
+                console.warn(`Gasto programado ${gastoProgramadoDoc.id} alcanzó el límite de recuperación`);
+              }
             }
           } catch (error) {
             failures.push(error);
@@ -340,7 +465,7 @@ async function generarOcurrenciaProgramada({ db, groupId, scheduleRef, now }) {
   return db.runTransaction(async (transaction) => {
     const scheduleSnap = await transaction.get(scheduleRef);
     if (!scheduleSnap.exists) {
-      return "ya eliminado";
+      return { message: 'ya eliminado', hasAnotherDueOccurrence: false };
     }
 
     const schedule = scheduleSnap.data();
@@ -349,7 +474,7 @@ async function generarOcurrenciaProgramada({ db, groupId, scheduleRef, now }) {
       throw new TypeError("proximaFecha debe ser un Timestamp de Firestore");
     }
     if (scheduledAt.toMillis() > now.toMillis()) {
-      return "ya no vence";
+      return { message: 'ya no vence', hasAnotherDueOccurrence: false };
     }
 
     const scheduledDate = scheduledAt.toDate();
@@ -359,7 +484,7 @@ async function generarOcurrenciaProgramada({ db, groupId, scheduleRef, now }) {
     const occurrenceRef = db.collection("groups").doc(groupId).collection("gastos").doc(occurrenceId);
     const occurrenceSnap = await transaction.get(occurrenceRef);
     const isOneOff = schedule.frecuencia === null || schedule.frecuencia === undefined;
-    const nextDate = isOneOff ? null : nextScheduledDate(scheduledDate, schedule.frecuencia);
+    const nextDate = isOneOff ? null : nextScheduledDate(scheduledDate, schedule.frecuencia, schedule.diaAncla ?? undefined);
 
     if (!occurrenceSnap.exists) {
       transaction.create(occurrenceRef, {
@@ -394,16 +519,22 @@ async function generarOcurrenciaProgramada({ db, groupId, scheduleRef, now }) {
 
     if (isOneOff) {
       transaction.delete(scheduleRef);
-      return occurrenceSnap.exists ? "ocurrencia existente y programación eliminada" : "ocurrencia creada y programación eliminada";
+      return {
+        message: occurrenceSnap.exists ? 'ocurrencia existente y programación eliminada' : 'ocurrencia creada y programación eliminada',
+        hasAnotherDueOccurrence: false,
+      };
     }
 
     transaction.update(scheduleRef, { proximaFecha: Timestamp.fromDate(nextDate) });
-    return occurrenceSnap.exists ? "ocurrencia existente y próxima fecha avanzada" : "ocurrencia creada";
+    return {
+      message: occurrenceSnap.exists ? 'ocurrencia existente y próxima fecha avanzada' : 'ocurrencia creada',
+      hasAnotherDueOccurrence: nextDate.getTime() <= now.toMillis(),
+    };
   });
 }
 
 exports.recordatorioDeudas = functions.pubsub
-  .schedule("every day 15:00")
+  .schedule("every day 15:15")
   .retryConfig({
     retryCount: 2,
     minBackoffDuration: "60s",

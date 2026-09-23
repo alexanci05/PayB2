@@ -67,7 +67,11 @@ String scheduledOccurrenceId(String scheduleId, DateTime scheduledAt) {
   return '${scheduleId}_${scheduledAt.toUtc().microsecondsSinceEpoch}';
 }
 
-DateTime? nextOccurrenceDate(DateTime date, String frequency) {
+DateTime? nextOccurrenceDate(
+  DateTime date,
+  String frequency, {
+  int? anchorDay,
+}) {
   switch (frequency) {
     case 'Cada 7 días':
       return date.add(const Duration(days: 7));
@@ -78,21 +82,24 @@ DateTime? nextOccurrenceDate(DateTime date, String frequency) {
     case 'Cada 365 días':
       return date.add(const Duration(days: 365));
     case 'Mensual (mismo día todos los meses)':
-      return _addClampedMonths(date, 1);
+      return _addClampedMonths(date, 1, anchorDay ?? date.day);
     case 'Trimestral (mismo día cada 3 meses)':
-      return _addClampedMonths(date, 3);
+      return _addClampedMonths(date, 3, anchorDay ?? date.day);
     case 'Anual (mismo día cada año)':
-      return _addClampedMonths(date, 12);
+      return _addClampedMonths(date, 12, anchorDay ?? date.day);
     default:
       return null;
   }
 }
 
-DateTime _addClampedMonths(DateTime date, int months) {
+DateTime _addClampedMonths(DateTime date, int months, int anchorDay) {
+  if (anchorDay < 1 || anchorDay > 31) {
+    throw ArgumentError.value(anchorDay, 'anchorDay', 'Must be from 1 to 31.');
+  }
   final targetYear = date.year + ((date.month - 1 + months) ~/ 12);
   final targetMonth = (date.month - 1 + months) % 12 + 1;
   final lastDay = DateTime(targetYear, targetMonth + 1, 0).day;
-  final targetDay = date.day <= lastDay ? date.day : lastDay;
+  final targetDay = anchorDay <= lastDay ? anchorDay : lastDay;
 
   if (date.isUtc) {
     return DateTime.utc(

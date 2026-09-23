@@ -1,8 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:payb2/screens/crear_gasto/crear_gasto.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:fl_chart/fl_chart.dart';
 
 class GrupoDetalleScreen extends StatefulWidget {
@@ -120,35 +123,27 @@ class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
 
     if (chosen == null) return;
 
-    final memberRef = db
-        .collection('groups')
-        .doc(widget.groupId)
-        .collection('members')
-        .doc(chosen);
-
-    final claimed = await db.runTransaction((transaction) async {
-      final memberSnapshot = await transaction.get(memberRef);
-      if (!memberSnapshot.exists) return false;
-
-      final claimedBy = memberSnapshot.data()?['reclamadoPor'] as String?;
-      if (claimedBy != null && claimedBy != _uid) return false;
-
-      transaction.update(memberRef, {'reclamadoPor': _uid});
-      return true;
-    });
-
-    if (!mounted) return;
-    if (!claimed) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Otro usuario acaba de reclamar ese miembro'),
-        ),
-      );
-      await _checkOrAskMember();
-      return;
+    try {
+      final result = await FirebaseFunctions.instance
+          .httpsCallable('reclamarMiembro')
+          .call({'groupId': widget.groupId, 'memberId': chosen});
+      if (!mounted) return;
+      setState(() => _myMemberId = result.data['memberId'] as String);
+    } on FirebaseFunctionsException catch (error) {
+      if (!mounted) return;
+      if (error.code == 'failed-precondition') {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Otro usuario acaba de reclamar ese miembro'),
+          ),
+        );
+        await _checkOrAskMember();
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('No se pudo reclamar la identidad')),
+        );
+      }
     }
-
-    setState(() => _myMemberId = chosen);
   }
 
   void _refreshDerivedViews() {
@@ -308,12 +303,19 @@ class _GastosViewState extends State<GastosView> {
     );
 
     if (choice == null) return;
-    await deleteGastoConSplits(
-      groupId: widget.groupId,
-      gastoId: gastoId,
-      scheduleId: choice == _DeleteChoice.series ? scheduleId : null,
-    );
-    widget.onChanged();
+    try {
+      await FirebaseFunctions.instance.httpsCallable('eliminarGasto').call({
+        'groupId': widget.groupId,
+        'gastoId': gastoId,
+        'eliminarSerie': choice == _DeleteChoice.series,
+      });
+      widget.onChanged();
+    } on FirebaseFunctionsException {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No se pudo eliminar el gasto')),
+      );
+    }
   }
 
   @override
@@ -450,34 +452,70 @@ class SaldosView extends StatefulWidget {
 }
 
 class _SaldosViewState extends State<SaldosView> {
-  late Future<List<QueryDocumentSnapshot<Map<String, dynamic>>>>
-  _futureDivisiones;
+  late final Stream<List<QueryDocumentSnapshot<Map<String, dynamic>>>>
+  _divisionesStream;
 
   @override
   void initState() {
     super.initState();
-    _futureDivisiones = _loadDivisiones();
+    _divisionesStream = _watchDivisiones();
   }
 
-  Future<List<QueryDocumentSnapshot<Map<String, dynamic>>>>
-  _loadDivisiones() async {
-    final gastosSnap = await FirebaseFirestore.instance
+  Stream<List<QueryDocumentSnapshot<Map<String, dynamic>>>> _watchDivisiones() {
+    final gastosQuery = FirebaseFirestore.instance
         .collection('groups')
         .doc(widget.groupId)
-        .collection('gastos')
-        .get();
+        .collection('gastos');
+    late StreamController<List<QueryDocumentSnapshot<Map<String, dynamic>>>>
+    controller;
+    StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? gastosSubscription;
+    final divisionSubscriptions =
+        <String, StreamSubscription<QuerySnapshot<Map<String, dynamic>>>>{};
+    final divisionsByExpense =
+        <String, List<QueryDocumentSnapshot<Map<String, dynamic>>>>{};
 
-    final List<QueryDocumentSnapshot<Map<String, dynamic>>> divisiones = [];
-
-    for (final gastoDoc in gastosSnap.docs) {
-      final divisionesSnap = await gastoDoc.reference
-          .collection('divisiones')
-          .get();
-
-      divisiones.addAll(divisionesSnap.docs);
+    void emit() {
+      if (!controller.isClosed) {
+        controller.add(
+          divisionsByExpense.values.expand((docs) => docs).toList(),
+        );
+      }
     }
 
-    return divisiones;
+    controller = StreamController(
+      onListen: () {
+        gastosSubscription = gastosQuery.snapshots().listen((gastos) {
+          final currentIds = gastos.docs.map((doc) => doc.id).toSet();
+          for (final expenseId
+              in divisionSubscriptions.keys
+                  .where((id) => !currentIds.contains(id))
+                  .toList()) {
+            divisionSubscriptions.remove(expenseId)?.cancel();
+            divisionsByExpense.remove(expenseId);
+          }
+
+          for (final gasto in gastos.docs) {
+            if (divisionSubscriptions.containsKey(gasto.id)) continue;
+            divisionSubscriptions[gasto.id] = gasto.reference
+                .collection('divisiones')
+                .snapshots()
+                .listen((divisiones) {
+                  if (!divisionSubscriptions.containsKey(gasto.id)) return;
+                  divisionsByExpense[gasto.id] = divisiones.docs;
+                  emit();
+                }, onError: controller.addError);
+          }
+          emit();
+        }, onError: controller.addError);
+      },
+      onCancel: () async {
+        await gastosSubscription?.cancel();
+        await Future.wait(
+          divisionSubscriptions.values.map((item) => item.cancel()),
+        );
+      },
+    );
+    return controller.stream;
   }
 
   Future<void> _marcarPagado(
@@ -491,11 +529,6 @@ class _SaldosViewState extends State<SaldosView> {
         'pagado': true,
         'pagadoEn': FieldValue.serverTimestamp(),
         'pagoRegistradoPor': currentMemberId,
-      });
-
-      if (!mounted) return;
-      setState(() {
-        _futureDivisiones = _loadDivisiones();
       });
     } catch (_) {
       if (!mounted) return;
@@ -535,11 +568,6 @@ class _SaldosViewState extends State<SaldosView> {
         'pagadoEn': FieldValue.delete(),
         'pagoRegistradoPor': FieldValue.delete(),
       });
-
-      if (!mounted) return;
-      setState(() {
-        _futureDivisiones = _loadDivisiones();
-      });
     } catch (_) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -575,8 +603,8 @@ class _SaldosViewState extends State<SaldosView> {
 
   @override
   Widget build(BuildContext context) {
-    return FutureBuilder<List<QueryDocumentSnapshot<Map<String, dynamic>>>>(
-      future: _futureDivisiones,
+    return StreamBuilder<List<QueryDocumentSnapshot<Map<String, dynamic>>>>(
+      stream: _divisionesStream,
       builder: (context, snap) {
         if (snap.connectionState == ConnectionState.waiting) {
           return const Center(child: CircularProgressIndicator());
@@ -593,7 +621,8 @@ class _SaldosViewState extends State<SaldosView> {
           final data = division.data();
           return data['pagado'] == true &&
               data['pagadoPor'] == widget.myMemberId &&
-              data['memberId'] != widget.myMemberId;
+              data['memberId'] != widget.myMemberId &&
+              data['pagoRegistradoPor'] == data['memberId'];
         }).toList();
 
         if (pendientes.isEmpty && pagosRecibidos.isEmpty) {
@@ -767,50 +796,20 @@ class _SaldosViewState extends State<SaldosView> {
   }
 }
 
-class EstadisticasView extends StatefulWidget {
+class EstadisticasView extends StatelessWidget {
   final String groupId;
 
   const EstadisticasView({super.key, required this.groupId});
 
   @override
-  State<EstadisticasView> createState() => _EstadisticasViewState();
-}
-
-class _EstadisticasViewState extends State<EstadisticasView> {
-  late Future<List<_GastoEntry>> _futureGastos;
-
-  @override
-  void initState() {
-    super.initState();
-    _futureGastos = _loadGastos();
-  }
-
-  Future<List<_GastoEntry>> _loadGastos() async {
-    final gastosSnap = await FirebaseFirestore.instance
-        .collection('groups')
-        .doc(widget.groupId)
-        .collection('gastos')
-        .get();
-
-    final List<_GastoEntry> entries = [];
-
-    for (final doc in gastosSnap.docs) {
-      final data = doc.data();
-      final nombre = data['nombre'] as String? ?? 'Gasto';
-      final importe = (data['cantidad'] as num?)?.toDouble() ?? 0.0;
-
-      if (importe > 0) {
-        entries.add(_GastoEntry(nombre, importe));
-      }
-    }
-
-    return entries;
-  }
-
   @override
   Widget build(BuildContext context) {
-    return FutureBuilder<List<_GastoEntry>>(
-      future: _futureGastos,
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: FirebaseFirestore.instance
+          .collection('groups')
+          .doc(groupId)
+          .collection('gastos')
+          .snapshots(),
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {
           return const Center(child: CircularProgressIndicator());
@@ -819,7 +818,16 @@ class _EstadisticasViewState extends State<EstadisticasView> {
           return Center(child: Text('Error: ${snapshot.error}'));
         }
 
-        final gastos = snapshot.data!;
+        final gastos = snapshot.data!.docs
+            .map((doc) {
+              final data = doc.data();
+              return _GastoEntry(
+                data['nombre'] as String? ?? 'Gasto',
+                (data['cantidad'] as num?)?.toDouble() ?? 0,
+              );
+            })
+            .where((entry) => entry.importe > 0)
+            .toList();
         final total = gastos.fold(
           0.0,
           (amount, entry) => amount + entry.importe,
@@ -934,44 +942,4 @@ Color _getColorForGasto(String nombre) {
   ];
   final index = nombre.hashCode % colors.length;
   return colors[index];
-}
-
-Future<void> deleteGastoConSplits({
-  required String groupId,
-  required String gastoId,
-  String? scheduleId,
-}) async {
-  final firestore = FirebaseFirestore.instance;
-  final gastoDocRef = firestore
-      .collection('groups')
-      .doc(groupId)
-      .collection('gastos')
-      .doc(gastoId);
-
-  // 1) Obtén todos los splits
-  final splitsSnap = await gastoDocRef.collection('divisiones').get();
-
-  // 2) Prepara un batch
-  final batch = firestore.batch();
-
-  // 3) Marca cada split para borrado
-  for (var splitDoc in splitsSnap.docs) {
-    batch.delete(splitDoc.reference);
-  }
-
-  // 4) Marca el gasto para borrado
-  batch.delete(gastoDocRef);
-
-  if (scheduleId != null) {
-    batch.delete(
-      firestore
-          .collection('groups')
-          .doc(groupId)
-          .collection('gastosProgramados')
-          .doc(scheduleId),
-    );
-  }
-
-  // 5) Ejecuta todo en una sola operación atómica
-  await batch.commit();
 }

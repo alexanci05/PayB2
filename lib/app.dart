@@ -38,8 +38,8 @@ class _MyAppState extends State<MyApp> {
           notification.body,
           NotificationDetails(
             android: AndroidNotificationDetails(
-              'canal_notificaciones', // ID del canal
-              'Notificaciones', // Nombre visible
+              notificationChannel.id,
+              notificationChannel.name,
               importance: Importance.max,
               priority: Priority.high,
             ),

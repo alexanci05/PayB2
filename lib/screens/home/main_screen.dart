@@ -95,6 +95,8 @@ class GroupsScreen extends StatefulWidget {
 class _GroupsScreenState extends State<GroupsScreen> {
   String? deviceId;
   late Future<List<DocumentSnapshot>> futureGroups;
+  bool _isLoading = true;
+  String? _loadError;
 
   @override
   void initState() {
@@ -103,19 +105,30 @@ class _GroupsScreenState extends State<GroupsScreen> {
   }
 
   Future<void> loadGroups() async {
-    final id = await getUid();
-
-    final memberQuery = await FirebaseFirestore.instance
-        .collection('groupMembers')
-        .where('deviceId', isEqualTo: id)
-        .get();
-
-    final groupIds = memberQuery.docs.map((doc) => doc['groupId']).toList();
-
     if (mounted) {
+      setState(() {
+        _isLoading = true;
+        _loadError = null;
+      });
+    }
+    try {
+      final id = await getUid();
+      final memberQuery = await FirebaseFirestore.instance
+          .collection('groupMembers')
+          .where('deviceId', isEqualTo: id)
+          .get();
+      final groupIds = memberQuery.docs.map((doc) => doc['groupId']).toList();
+      if (!mounted) return;
       setState(() {
         deviceId = id;
         futureGroups = _loadGroupDocs(groupIds);
+        _isLoading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _isLoading = false;
+        _loadError = 'No se pudieron cargar los grupos';
       });
     }
   }
@@ -130,8 +143,23 @@ class _GroupsScreenState extends State<GroupsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    if (deviceId == null) {
+    if (_isLoading) {
       return const Center(child: CircularProgressIndicator());
+    }
+    if (_loadError != null || deviceId == null) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(_loadError ?? 'No se pudieron cargar los grupos'),
+            const SizedBox(height: 8),
+            FilledButton(
+              onPressed: loadGroups,
+              child: const Text('Reintentar'),
+            ),
+          ],
+        ),
+      );
     }
 
     return FutureBuilder<List<DocumentSnapshot>>(

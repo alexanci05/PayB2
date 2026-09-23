@@ -1,5 +1,8 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:cloud_functions/cloud_functions.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:payb2/screens/home/main_screen.dart';
 
 class CrearGrupoScreen extends StatefulWidget {
@@ -13,6 +16,9 @@ class CrearGrupoScreenState extends State<CrearGrupoScreen> {
   final _formKey = GlobalKey<FormState>();
   final TextEditingController _nombreController = TextEditingController();
   final List<TextEditingController> _miembrosControllers = [];
+  bool _isSubmitting = false;
+  String? _requestPayload;
+  String? _requestId;
 
   @override
   void dispose() {
@@ -37,6 +43,7 @@ class CrearGrupoScreenState extends State<CrearGrupoScreen> {
   }
 
   Future<void> _onSubmit() async {
+    if (_isSubmitting) return;
     if (!_formKey.currentState!.validate()) return;
 
     final nombre = _nombreController.text.trim();
@@ -64,11 +71,22 @@ class CrearGrupoScreenState extends State<CrearGrupoScreen> {
       return;
     }
 
+    final payload = <String, dynamic>{
+      'nombre': nombre,
+      'miembros': memberNames,
+    };
+    final encodedPayload = jsonEncode(payload);
+    if (_requestPayload != encodedPayload) {
+      _requestPayload = encodedPayload;
+      _requestId = FirebaseFirestore.instance.collection('groups').doc().id;
+    }
+
+    setState(() => _isSubmitting = true);
     try {
       final callable = FirebaseFunctions.instance.httpsCallable('crearGrupo');
       await callable.call<Map<String, dynamic>>({
-        'nombre': nombre,
-        'miembros': memberNames,
+        ...payload,
+        'requestId': _requestId,
       });
 
       if (!mounted) return;
@@ -96,6 +114,8 @@ class CrearGrupoScreenState extends State<CrearGrupoScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('No se pudo conectar con el servidor')),
       );
+    } finally {
+      if (mounted) setState(() => _isSubmitting = false);
     }
   }
 
@@ -158,7 +178,7 @@ class CrearGrupoScreenState extends State<CrearGrupoScreen> {
               ),
               const SizedBox(height: 20),
               ElevatedButton(
-                onPressed: _onSubmit,
+                onPressed: _isSubmitting ? null : _onSubmit,
                 style: ElevatedButton.styleFrom(
                   minimumSize: const Size.fromHeight(48),
                 ),

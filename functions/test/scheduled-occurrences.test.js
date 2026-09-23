@@ -49,6 +49,49 @@ test('calendar frequencies clamp end-of-month and leap-day occurrences', () => {
   );
 });
 
+test('monthly occurrences recover the anchored day after short months', () => {
+  const frequency = 'Mensual (mismo día todos los meses)';
+  for (const [year, februaryDay] of [[2023, 28], [2024, 29]]) {
+    let date = new Date(`${year}-01-31T09:30:00.000Z`);
+    for (const expected of [
+      `${year}-02-${februaryDay}T09:30:00.000Z`,
+      `${year}-03-31T09:30:00.000Z`,
+      `${year}-04-30T09:30:00.000Z`,
+    ]) {
+      date = nextScheduledDate(date, frequency, 31);
+      assert.equal(date.toISOString(), expected);
+    }
+  }
+});
+
+test('quarterly occurrences recover the anchored day after a 30-day month', () => {
+  let date = new Date('2024-03-31T09:30:00.000Z');
+  for (const expected of [
+    '2024-06-30T09:30:00.000Z',
+    '2024-09-30T09:30:00.000Z',
+    '2024-12-31T09:30:00.000Z',
+  ]) {
+    date = nextScheduledDate(date, 'Trimestral (mismo día cada 3 meses)', 31);
+    assert.equal(date.toISOString(), expected);
+  }
+});
+
+test('annual leap-day occurrences recover February 29 in the next leap year', () => {
+  let date = new Date('2024-02-29T09:30:00.000Z');
+  for (const year of [2025, 2026, 2027, 2028]) {
+    date = nextScheduledDate(date, 'Anual (mismo día cada año)', 29);
+    assert.equal(date.toISOString(), `${year}-02-${year === 2028 ? 29 : 28}T09:30:00.000Z`);
+  }
+});
+
+test('fixed-day frequencies ignore a calendar anchor', () => {
+  const date = new Date('2024-01-31T09:30:00.000Z');
+  assert.equal(
+    nextScheduledDate(date, 'Cada 30 días', 31).toISOString(),
+    nextScheduledDate(date, 'Cada 30 días').toISOString(),
+  );
+});
+
 test('scheduled occurrence and division ids are deterministic', () => {
   assert.equal(scheduledOccurrenceId('schedule-123', new Date('2026-09-17T15:00:00.000Z')), 'schedule-123_1789657200000000');
   assert.equal(scheduledOccurrenceId('schedule-123', 1789657200000), 'schedule-123_1789657200000000');

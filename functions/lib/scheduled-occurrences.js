@@ -57,8 +57,12 @@ function splitCents(totalCents, payerId, participantes) {
   });
 }
 
-function nextScheduledDate(scheduledDate, frecuencia) {
+function nextScheduledDate(scheduledDate, frecuencia, anchorDay) {
   const date = validDate(scheduledDate);
+  const day = anchorDay === undefined ? date.getUTCDate() : anchorDay;
+  if (!Number.isInteger(day) || day < 1 || day > 31) {
+    throw new RangeError('anchorDay must be a day between 1 and 31');
+  }
 
   switch (frecuencia) {
     case 'Cada 7 días':
@@ -70,11 +74,11 @@ function nextScheduledDate(scheduledDate, frecuencia) {
     case 'Cada 365 días':
       return new Date(date.getTime() + 365 * DAY_MS);
     case 'Mensual (mismo día todos los meses)':
-      return addMonthsClamped(date, 1);
+      return addMonthsClamped(date, 1, day);
     case 'Trimestral (mismo día cada 3 meses)':
-      return addMonthsClamped(date, 3);
+      return addMonthsClamped(date, 3, day);
     case 'Anual (mismo día cada año)':
-      return addYearsClamped(date, 1);
+      return addYearsClamped(date, 1, day);
     default:
       throw new RangeError(`Unsupported frecuencia: ${frecuencia}`);
   }
@@ -94,7 +98,7 @@ function divisionId(memberId) {
   return memberId;
 }
 
-function addMonthsClamped(date, monthsToAdd) {
+function addMonthsClamped(date, monthsToAdd, anchorDay) {
   const year = date.getUTCFullYear();
   const month = date.getUTCMonth() + monthsToAdd;
   const target = new Date(Date.UTC(
@@ -106,11 +110,11 @@ function addMonthsClamped(date, monthsToAdd) {
     date.getUTCSeconds(),
     date.getUTCMilliseconds(),
   ));
-  target.setUTCDate(Math.min(date.getUTCDate(), daysInUtcMonth(target.getUTCFullYear(), target.getUTCMonth())));
+  target.setUTCDate(Math.min(anchorDay, daysInUtcMonth(target.getUTCFullYear(), target.getUTCMonth())));
   return target;
 }
 
-function addYearsClamped(date, yearsToAdd) {
+function addYearsClamped(date, yearsToAdd, anchorDay) {
   const target = new Date(Date.UTC(
     date.getUTCFullYear() + yearsToAdd,
     date.getUTCMonth(),
@@ -120,7 +124,7 @@ function addYearsClamped(date, yearsToAdd) {
     date.getUTCSeconds(),
     date.getUTCMilliseconds(),
   ));
-  target.setUTCDate(Math.min(date.getUTCDate(), daysInUtcMonth(target.getUTCFullYear(), target.getUTCMonth())));
+  target.setUTCDate(Math.min(anchorDay, daysInUtcMonth(target.getUTCFullYear(), target.getUTCMonth())));
   return target;
 }
 

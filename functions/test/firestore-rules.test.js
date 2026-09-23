@@ -16,7 +16,6 @@ const {
   serverTimestamp,
   setDoc,
   updateDoc,
-  writeBatch,
 } = require('firebase/firestore');
 
 let testEnv;
@@ -74,6 +73,9 @@ beforeEach(async () => {
         createdByUid: 'creditor-uid',
         fecha: new Date(),
       }),
+      setDoc(doc(db, 'groups/group-1/gastosProgramados/schedule-1'), {
+        nombre: 'Cena', createdByUid: 'creditor-uid',
+      }),
       setDoc(
         doc(db, 'groups/group-1/gastos/expense-1/divisiones/debtor'),
         {
@@ -100,6 +102,54 @@ test('un miembro puede leer su grupo y un usuario ajeno no', async () => {
   await assertFails(getDoc(doc(outsiderDb, 'groups/group-1')));
 });
 
+test('el propietario puede renombrar su grupo con un nombre valido', async () => {
+  const db = testEnv.authenticatedContext('creditor-uid').firestore();
+  const group = doc(db, 'groups/group-1');
+
+  await assertSucceeds(updateDoc(group, { name: 'Viaje nuevo' }));
+  await assertSucceeds(updateDoc(group, { name: 'A'.repeat(80) }));
+});
+
+test('el propietario no puede usar nombres invalidos', async () => {
+  const db = testEnv.authenticatedContext('creditor-uid').firestore();
+  const group = doc(db, 'groups/group-1');
+
+  await assertFails(updateDoc(group, { name: '' }));
+  await assertFails(updateDoc(group, { name: 'A'.repeat(81) }));
+  await assertFails(updateDoc(group, { name: 123 }));
+});
+
+test('el propietario no puede cambiar otros campos ni al renombrar', async () => {
+  const db = testEnv.authenticatedContext('creditor-uid').firestore();
+  const group = doc(db, 'groups/group-1');
+
+  await assertFails(updateDoc(group, { groupCode: 'OTRO' }));
+  await assertFails(updateDoc(group, {
+    name: 'Viaje nuevo', groupCode: 'OTRO',
+  }));
+  await assertFails(updateDoc(group, { ownerDeviceId: 'debtor-uid' }));
+  await assertFails(updateDoc(group, {
+    name: 'Viaje nuevo', ownerDeviceId: 'debtor-uid',
+  }));
+  await assertFails(updateDoc(group, {
+    name: 'Viaje nuevo', description: 'Campo extra',
+  }));
+});
+
+test('un miembro que no es propietario no puede renombrar el grupo', async () => {
+  const db = testEnv.authenticatedContext('debtor-uid').firestore();
+
+  await assertFails(updateDoc(doc(db, 'groups/group-1'), {
+    name: 'Viaje nuevo',
+  }));
+});
+
+test('el propietario no puede eliminar directamente un grupo con subcolecciones', async () => {
+  const db = testEnv.authenticatedContext('creditor-uid').firestore();
+
+  await assertFails(deleteDoc(doc(db, 'groups/group-1')));
+});
+
 test('un cliente no puede crear gastos, divisiones ni programaciones directamente', async () => {
   const db = testEnv.authenticatedContext('creditor-uid').firestore();
   await assertFails(setDoc(doc(db, 'groups/group-1/gastos/otro'), {
@@ -117,14 +167,32 @@ test('un cliente no puede crear gastos, divisiones ni programaciones directament
   }));
 });
 
-test('una division solo se elimina junto con su gasto', async () => {
+test('un cliente no puede crear, actualizar ni eliminar miembros directamente', async () => {
+  const ownerDb = testEnv.authenticatedContext('creditor-uid').firestore();
+  const memberDb = testEnv.authenticatedContext('debtor-uid').firestore();
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    await setDoc(doc(context.firestore(), 'groups/group-1/members/unclaimed'), {
+      name: 'Sin reclamar', reclamadoPor: null,
+    });
+  });
+
+  await assertFails(setDoc(doc(ownerDb, 'groups/group-1/members/new'), {
+    name: 'Nuevo', reclamadoPor: null,
+  }));
+  await assertFails(updateDoc(doc(ownerDb, 'groups/group-1/members/debtor'), {
+    name: 'Cambiado',
+  }));
+  await assertFails(deleteDoc(doc(ownerDb, 'groups/group-1/members/debtor')));
+  await assertFails(updateDoc(doc(memberDb, 'groups/group-1/members/unclaimed'), {
+    reclamadoPor: 'debtor-uid',
+  }));
+});
+
+test('un cliente no puede eliminar directamente gastos ni divisiones', async () => {
   const db = testEnv.authenticatedContext('creditor-uid').firestore();
   await assertFails(deleteDoc(debtRef(db)));
-
-  const batch = writeBatch(db);
-  batch.delete(debtRef(db));
-  batch.delete(doc(db, 'groups/group-1/gastos/expense-1'));
-  await assertSucceeds(batch.commit());
+  await assertFails(deleteDoc(doc(db, 'groups/group-1/gastos/expense-1')));
+  await assertFails(deleteDoc(doc(db, 'groups/group-1/gastosProgramados/schedule-1')));
 });
 
 test('el deudor puede marcar su propia deuda como pagada', async () => {

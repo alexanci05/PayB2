@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter/material.dart';
@@ -31,6 +33,12 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
   bool _selectAll = false;
   bool _esPeriodico = false;
   String? _frecuenciaSeleccionada;
+  bool _isSubmitting = false;
+  String? _requestPayload;
+  String? _requestId;
+  late final int _timeZoneOffsetMinutes;
+  bool _isLoadingUsers = true;
+  String? _loadUsersError;
 
   static const _frecuencias = [
     'Cada 7 días',
@@ -46,28 +54,43 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
   void initState() {
     super.initState();
     _selectedDate = DateTime.now();
+    _timeZoneOffsetMinutes = DateTime.now().timeZoneOffset.inMinutes;
     _cargarUsuarios();
   }
 
   Future<void> _cargarUsuarios() async {
-    final snapshot = await FirebaseFirestore.instance
-        .collection('groups')
-        .doc(widget.groupId)
-        .collection('members')
-        .get();
-
-    if (!mounted) return;
-    setState(() {
-      _usuarios = snapshot.docs
-          .map(
-            (doc) => {
-              'id': doc.id,
-              'nombre': doc.data()['name'] as String? ?? doc.id,
-            },
-          )
-          .toList();
-      _syncSelectAll();
-    });
+    if (mounted) {
+      setState(() {
+        _isLoadingUsers = true;
+        _loadUsersError = null;
+      });
+    }
+    try {
+      final snapshot = await FirebaseFirestore.instance
+          .collection('groups')
+          .doc(widget.groupId)
+          .collection('members')
+          .get();
+      if (!mounted) return;
+      setState(() {
+        _usuarios = snapshot.docs
+            .map(
+              (doc) => {
+                'id': doc.id,
+                'nombre': doc.data()['name'] as String? ?? doc.id,
+              },
+            )
+            .toList();
+        _isLoadingUsers = false;
+        _syncSelectAll();
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _isLoadingUsers = false;
+        _loadUsersError = 'No se pudieron cargar los miembros';
+      });
+    }
   }
 
   void _onToggleSelectAll(bool? value) {
@@ -114,6 +137,7 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
   }
 
   Future<void> _onSubmit() async {
+    if (_isSubmitting) return;
     if (!_formKey.currentState!.validate()) return;
 
     final nombre = _nombreGastoController.text.trim();
@@ -140,16 +164,28 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
       return;
     }
 
+    final payload = <String, dynamic>{
+      'groupId': widget.groupId,
+      'nombre': nombre,
+      'descripcion': descripcion,
+      'cantidadCentimos': cantidadCentimos,
+      'fecha': DateFormat('yyyy-MM-dd').format(selectedDate),
+      'pagadoPor': pagadoPor,
+      'participantes': participantes,
+      'frecuencia': _esPeriodico ? _frecuenciaSeleccionada : null,
+      'timeZoneOffsetMinutes': _timeZoneOffsetMinutes,
+    };
+    final encodedPayload = jsonEncode(payload);
+    if (_requestPayload != encodedPayload) {
+      _requestPayload = encodedPayload;
+      _requestId = FirebaseFirestore.instance.collection('groups').doc().id;
+    }
+
+    setState(() => _isSubmitting = true);
     try {
       await FirebaseFunctions.instance.httpsCallable('crearGasto').call({
-        'groupId': widget.groupId,
-        'nombre': nombre,
-        'descripcion': descripcion,
-        'cantidadCentimos': cantidadCentimos,
-        'fecha': DateFormat('yyyy-MM-dd').format(selectedDate),
-        'pagadoPor': pagadoPor,
-        'participantes': participantes,
-        'frecuencia': _esPeriodico ? _frecuenciaSeleccionada : null,
+        ...payload,
+        'requestId': _requestId,
       });
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -159,6 +195,8 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
     } catch (error) {
       if (!mounted) return;
       _showError('Error al crear gasto: $error');
+    } finally {
+      if (mounted) setState(() => _isSubmitting = false);
     }
   }
 
@@ -184,153 +222,176 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
       body: SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(16),
-          child: SingleChildScrollView(
-            child: Form(
-              key: _formKey,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  TextFormField(
-                    controller: _nombreGastoController,
-                    decoration: const InputDecoration(
-                      labelText: 'Nombre del gasto',
-                    ),
-                    validator: (value) {
-                      if (value == null || value.trim().isEmpty) {
-                        return 'Por favor ingresa un nombre';
-                      }
-                      return null;
-                    },
-                  ),
-                  TextFormField(
-                    controller: _cantidadController,
-                    decoration: const InputDecoration(labelText: 'Importe'),
-                    keyboardType: const TextInputType.numberWithOptions(
-                      decimal: true,
-                    ),
-                    inputFormatters: [
-                      FilteringTextInputFormatter.allow(
-                        RegExp(r'^\d*[\.,]?\d{0,2}$'),
+          child: _isLoadingUsers
+              ? const Center(child: CircularProgressIndicator())
+              : _loadUsersError != null
+              ? Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(_loadUsersError!),
+                      const SizedBox(height: 8),
+                      FilledButton(
+                        onPressed: _cargarUsuarios,
+                        child: const Text('Reintentar'),
                       ),
                     ],
-                    validator: (value) {
-                      final cents = value == null
-                          ? null
-                          : parseAmountCents(value);
-                      if (cents == null || cents <= 0) {
-                        return 'Importe no válido';
-                      }
-                      return null;
-                    },
                   ),
-                  const SizedBox(height: 20),
-                  TextFormField(
-                    readOnly: true,
-                    controller: TextEditingController(
-                      text: _selectedDate == null
-                          ? ''
-                          : DateFormat('yyyy-MM-dd').format(_selectedDate!),
-                    ),
-                    decoration: const InputDecoration(
-                      labelText: 'Fecha del gasto',
-                      border: OutlineInputBorder(),
-                      suffixIcon: Icon(Icons.calendar_today),
-                    ),
-                    onTap: () async {
-                      final pickedDate = await showDatePicker(
-                        context: context,
-                        initialDate: _selectedDate ?? DateTime.now(),
-                        firstDate: DateTime(2000),
-                        lastDate: DateTime(2100),
-                      );
-                      if (pickedDate != null) {
-                        setState(() => _selectedDate = pickedDate);
-                      }
-                    },
-                  ),
-                  const SizedBox(height: 20),
-                  CheckboxListTile(
-                    title: const Text('¿Es un gasto periódico?'),
-                    value: _esPeriodico,
-                    onChanged: (value) {
-                      setState(() {
-                        _esPeriodico = value ?? false;
-                        if (!_esPeriodico) {
-                          _frecuenciaSeleccionada = null;
-                        }
-                      });
-                    },
-                  ),
-                  if (_esPeriodico)
-                    DropdownButtonFormField<String>(
-                      value: _frecuenciaSeleccionada,
-                      decoration: const InputDecoration(
-                        labelText: 'Frecuencia',
-                        border: OutlineInputBorder(),
-                      ),
-                      items: _frecuencias
-                          .map(
-                            (frequency) => DropdownMenuItem(
-                              value: frequency,
-                              child: Text(frequency),
+                )
+              : SingleChildScrollView(
+                  child: Form(
+                    key: _formKey,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        TextFormField(
+                          controller: _nombreGastoController,
+                          decoration: const InputDecoration(
+                            labelText: 'Nombre del gasto',
+                          ),
+                          validator: (value) {
+                            if (value == null || value.trim().isEmpty) {
+                              return 'Por favor ingresa un nombre';
+                            }
+                            return null;
+                          },
+                        ),
+                        TextFormField(
+                          controller: _cantidadController,
+                          decoration: const InputDecoration(
+                            labelText: 'Importe',
+                          ),
+                          keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true,
+                          ),
+                          inputFormatters: [
+                            FilteringTextInputFormatter.allow(
+                              RegExp(r'^\d*[\.,]?\d{0,2}$'),
                             ),
-                          )
-                          .toList(),
-                      onChanged: (value) {
-                        setState(() => _frecuenciaSeleccionada = value);
-                      },
-                      validator: (value) {
-                        if (_esPeriodico && value == null) {
-                          return 'Selecciona una frecuencia';
-                        }
-                        return null;
-                      },
+                          ],
+                          validator: (value) {
+                            final cents = value == null
+                                ? null
+                                : parseAmountCents(value);
+                            if (cents == null || cents <= 0) {
+                              return 'Importe no válido';
+                            }
+                            return null;
+                          },
+                        ),
+                        const SizedBox(height: 20),
+                        TextFormField(
+                          readOnly: true,
+                          controller: TextEditingController(
+                            text: _selectedDate == null
+                                ? ''
+                                : DateFormat(
+                                    'yyyy-MM-dd',
+                                  ).format(_selectedDate!),
+                          ),
+                          decoration: const InputDecoration(
+                            labelText: 'Fecha del gasto',
+                            border: OutlineInputBorder(),
+                            suffixIcon: Icon(Icons.calendar_today),
+                          ),
+                          onTap: () async {
+                            final pickedDate = await showDatePicker(
+                              context: context,
+                              initialDate: _selectedDate ?? DateTime.now(),
+                              firstDate: DateTime(2000),
+                              lastDate: DateTime(2100),
+                            );
+                            if (pickedDate != null) {
+                              setState(() => _selectedDate = pickedDate);
+                            }
+                          },
+                        ),
+                        const SizedBox(height: 20),
+                        CheckboxListTile(
+                          title: const Text('¿Es un gasto periódico?'),
+                          value: _esPeriodico,
+                          onChanged: (value) {
+                            setState(() {
+                              _esPeriodico = value ?? false;
+                              if (!_esPeriodico) {
+                                _frecuenciaSeleccionada = null;
+                              }
+                            });
+                          },
+                        ),
+                        if (_esPeriodico)
+                          DropdownButtonFormField<String>(
+                            value: _frecuenciaSeleccionada,
+                            decoration: const InputDecoration(
+                              labelText: 'Frecuencia',
+                              border: OutlineInputBorder(),
+                            ),
+                            items: _frecuencias
+                                .map(
+                                  (frequency) => DropdownMenuItem(
+                                    value: frequency,
+                                    child: Text(frequency),
+                                  ),
+                                )
+                                .toList(),
+                            onChanged: (value) {
+                              setState(() => _frecuenciaSeleccionada = value);
+                            },
+                            validator: (value) {
+                              if (_esPeriodico && value == null) {
+                                return 'Selecciona una frecuencia';
+                              }
+                              return null;
+                            },
+                          ),
+                        TextFormField(
+                          controller: _descripcionController,
+                          decoration: const InputDecoration(
+                            labelText: 'Descripción (opcional)',
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        InputDecorator(
+                          decoration: const InputDecoration(
+                            labelText: 'Pagado por',
+                            border: OutlineInputBorder(),
+                          ),
+                          child: Text(_currentMemberName),
+                        ),
+                        const SizedBox(height: 20),
+                        const Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text('¿Entre quiénes se divide?'),
+                        ),
+                        CheckboxListTile(
+                          title: const Text('Todos los miembros'),
+                          value: _selectAll,
+                          onChanged: _onToggleSelectAll,
+                        ),
+                        ..._usuarios
+                            .where(
+                              (user) => user['id'] != widget.currentMemberId,
+                            )
+                            .map((user) {
+                              final id = user['id'] as String;
+                              return CheckboxListTile(
+                                title: Text(user['nombre'] as String),
+                                value: _selectedParticipants.contains(id),
+                                onChanged: (value) =>
+                                    _onToggleParticipant(id, value),
+                              );
+                            }),
+                        const SizedBox(height: 20),
+                        Center(
+                          child: ElevatedButton(
+                            onPressed: _isSubmitting ? null : _onSubmit,
+                            child: const Text('Crear gasto'),
+                          ),
+                        ),
+                      ],
                     ),
-                  TextFormField(
-                    controller: _descripcionController,
-                    decoration: const InputDecoration(
-                      labelText: 'Descripción (opcional)',
-                    ),
                   ),
-                  const SizedBox(height: 16),
-                  InputDecorator(
-                    decoration: const InputDecoration(
-                      labelText: 'Pagado por',
-                      border: OutlineInputBorder(),
-                    ),
-                    child: Text(_currentMemberName),
-                  ),
-                  const SizedBox(height: 20),
-                  const Align(
-                    alignment: Alignment.centerLeft,
-                    child: Text('¿Entre quiénes se divide?'),
-                  ),
-                  CheckboxListTile(
-                    title: const Text('Todos los miembros'),
-                    value: _selectAll,
-                    onChanged: _onToggleSelectAll,
-                  ),
-                  ..._usuarios
-                      .where((user) => user['id'] != widget.currentMemberId)
-                      .map((user) {
-                        final id = user['id'] as String;
-                        return CheckboxListTile(
-                          title: Text(user['nombre'] as String),
-                          value: _selectedParticipants.contains(id),
-                          onChanged: (value) => _onToggleParticipant(id, value),
-                        );
-                      }),
-                  const SizedBox(height: 20),
-                  Center(
-                    child: ElevatedButton(
-                      onPressed: _onSubmit,
-                      child: const Text('Crear gasto'),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
+                ),
         ),
       ),
     );

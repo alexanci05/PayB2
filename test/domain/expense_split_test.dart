@@ -78,6 +78,79 @@ void main() {
       );
     });
 
+    test('restores the anchor day after monthly February clamps', () {
+      for (final year in [2024, 2025]) {
+        final january = DateTime.utc(year, 1, 31, 12, 34, 56, 789, 123);
+        final february = nextOccurrenceDate(
+          january,
+          'Mensual (mismo día todos los meses)',
+          anchorDay: 31,
+        );
+        expect(
+          february,
+          DateTime.utc(year, 2, year == 2024 ? 29 : 28, 12, 34, 56, 789, 123),
+        );
+        expect(
+          nextOccurrenceDate(
+            february!,
+            'Mensual (mismo día todos los meses)',
+            anchorDay: 31,
+          ),
+          DateTime.utc(year, 3, 31, 12, 34, 56, 789, 123),
+        );
+      }
+    });
+
+    test('restores the anchor day after a quarterly clamp', () {
+      final april = nextOccurrenceDate(
+        DateTime(2025, 1, 31),
+        'Trimestral (mismo día cada 3 meses)',
+        anchorDay: 31,
+      );
+      expect(april, DateTime(2025, 4, 30));
+      expect(
+        nextOccurrenceDate(
+          april!,
+          'Trimestral (mismo día cada 3 meses)',
+          anchorDay: 31,
+        ),
+        DateTime(2025, 7, 31),
+      );
+    });
+
+    test('restores leap day for an anchored annual recurrence', () {
+      var occurrence = DateTime.utc(2024, 2, 29);
+      for (final year in [2025, 2026, 2027, 2028]) {
+        occurrence = nextOccurrenceDate(
+          occurrence,
+          'Anual (mismo día cada año)',
+          anchorDay: 29,
+        )!;
+        expect(occurrence, DateTime.utc(year, 2, year == 2028 ? 29 : 28));
+      }
+    });
+
+    test('keeps fixed-day frequencies independent of the anchor day', () {
+      final date = DateTime.utc(2025, 2, 28, 12);
+      for (final days in [7, 15, 30, 365]) {
+        expect(
+          nextOccurrenceDate(date, 'Cada $days días', anchorDay: 31),
+          date.add(Duration(days: days)),
+        );
+      }
+    });
+
+    test('rejects an invalid calendar anchor day', () {
+      expect(
+        () => nextOccurrenceDate(
+          DateTime.utc(2025, 2, 28),
+          'Mensual (mismo día todos los meses)',
+          anchorDay: 0,
+        ),
+        throwsArgumentError,
+      );
+    });
+
     test('uses a stable ID for a schedule timestamp', () {
       final date = DateTime.utc(2025, 1, 2, 3, 4, 5, 6, 7);
 

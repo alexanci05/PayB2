@@ -17,14 +17,21 @@ void main() async {
 
   await signAnonymus();
 
-  await initNotifications(); // Inicializa y pide permisos para notificaciones locales
-
-  await FirebaseMessaging.instance
-      .requestPermission(); // Pide permisos para notificaciones remotas
-
   runApp(MyApp());
 
-  unawaited(_registerMessagingToken());
+  unawaited(_initializeOptionalNotifications());
+}
+
+Future<void> _initializeOptionalNotifications() async {
+  try {
+    await initNotifications();
+    await FirebaseMessaging.instance.requestPermission();
+    await _registerMessagingToken();
+  } catch (error, stackTrace) {
+    debugPrint(
+      'No se pudieron inicializar las notificaciones: $error\n$stackTrace',
+    );
+  }
 }
 
 Future<void> _registerMessagingToken() async {
@@ -47,6 +54,12 @@ Future<void> signAnonymus() async {
 // Plugin de notificaciones locales (global)
 final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
     FlutterLocalNotificationsPlugin();
+const AndroidNotificationChannel notificationChannel =
+    AndroidNotificationChannel(
+      'canal_notificaciones',
+      'Notificaciones',
+      importance: Importance.high,
+    );
 
 // Inicializa notificaciones locales
 Future<void> initNotifications() async {
@@ -65,6 +78,11 @@ Future<void> initNotifications() async {
   );
 
   await flutterLocalNotificationsPlugin.initialize(initSettings);
+  await flutterLocalNotificationsPlugin
+      .resolvePlatformSpecificImplementation<
+        AndroidFlutterLocalNotificationsPlugin
+      >()
+      ?.createNotificationChannel(notificationChannel);
 
   await _requestNotificationPermission();
 }
