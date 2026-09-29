@@ -7,6 +7,8 @@ import 'package:intl/intl.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:fl_chart/fl_chart.dart';
+import 'package:payb2/services/auth/identity_mutation_tracker.dart';
+import 'package:payb2/services/debts/debt_queries.dart';
 
 class GrupoDetalleScreen extends StatefulWidget {
   final String groupId;
@@ -22,7 +24,7 @@ class GrupoDetalleScreen extends StatefulWidget {
 }
 
 class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
-  String? _myMemberId;
+  List<String> _myMemberIds = [];
   List<Map<String, String>> _members = [];
   late Future<Map<String, dynamic>> _miembroYMapa;
   int _dataRevision = 0;
@@ -62,18 +64,28 @@ class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
 
   Future<void> _checkOrAskMember() async {
     final db = FirebaseFirestore.instance;
+    final membershipFuture = db
+        .collection('groupMembers')
+        .doc('${widget.groupId}_$_uid')
+        .get();
 
     final snapReclamado = await db
         .collection('groups')
         .doc(widget.groupId)
         .collection('members')
         .where('reclamadoPor', isEqualTo: _uid)
-        .limit(1)
         .get();
 
     if (snapReclamado.docs.isNotEmpty) {
+      final membership = await membershipFuture;
+      final primaryMemberId = membership.data()?['memberId'] as String?;
       if (!mounted) return;
-      setState(() => _myMemberId = snapReclamado.docs.first.id);
+      setState(() {
+        _myMemberIds = snapReclamado.docs.map((doc) => doc.id).toList()..sort();
+        if (primaryMemberId != null && _myMemberIds.remove(primaryMemberId)) {
+          _myMemberIds.insert(0, primaryMemberId);
+        }
+      });
       return;
     }
 
@@ -124,11 +136,14 @@ class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
     if (chosen == null) return;
 
     try {
-      final result = await FirebaseFunctions.instance
-          .httpsCallable('reclamarMiembro')
-          .call({'groupId': widget.groupId, 'memberId': chosen});
+      final result = await IdentityMutationTracker.shared.track(
+        () => FirebaseFunctions.instance.httpsCallable('reclamarMiembro').call({
+          'groupId': widget.groupId,
+          'memberId': chosen,
+        }),
+      );
       if (!mounted) return;
-      setState(() => _myMemberId = result.data['memberId'] as String);
+      setState(() => _myMemberIds = [result.data['memberId'] as String]);
     } on FirebaseFunctionsException catch (error) {
       if (!mounted) return;
       if (error.code == 'failed-precondition') {
@@ -152,7 +167,7 @@ class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
   }
 
   Future<void> _onCrearGasto(BuildContext context) async {
-    final memberId = _myMemberId;
+    final memberId = _myMemberIds.firstOrNull;
     if (memberId == null) return;
 
     await Navigator.push(
@@ -205,11 +220,11 @@ class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
             ),
             body: Column(
               children: [
-                if (_myMemberId != null)
+                if (_myMemberIds.isNotEmpty)
                   Padding(
                     padding: const EdgeInsets.all(8.0),
                     child: Text(
-                      'Eres: ${memberMap[_myMemberId]?['name'] ?? 'Miembro desconocido'}',
+                      'Eres: ${_myMemberIds.map((id) => memberMap[id]?['name'] ?? 'Miembro desconocido').join(', ')}',
                       style: const TextStyle(fontWeight: FontWeight.bold),
                     ),
                   ),
@@ -219,7 +234,7 @@ class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
                       GastosView(
                         groupId: widget.groupId,
                         memberMap: memberMap,
-                        myMemberId: _myMemberId,
+                        myMemberIds: _myMemberIds.toSet(),
                         currentUid: _uid,
                         ownerUid: ownerUid,
                         onChanged: _refreshDerivedViews,
@@ -228,7 +243,7 @@ class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
                         key: ValueKey('saldos-$_dataRevision'),
                         groupId: widget.groupId,
                         memberMap: memberMap,
-                        myMemberId: _myMemberId,
+                        myMemberIds: _myMemberIds.toSet(),
                       ),
                       EstadisticasView(
                         key: ValueKey('estadisticas-$_dataRevision'),
@@ -239,7 +254,7 @@ class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
                 ),
               ],
             ),
-            floatingActionButton: _myMemberId == null
+            floatingActionButton: _myMemberIds.isEmpty
                 ? null
                 : FloatingActionButton(
                     onPressed: () => _onCrearGasto(context),
@@ -256,7 +271,7 @@ class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
 class GastosView extends StatefulWidget {
   final String groupId;
   final Map<String, Map<String, dynamic>> memberMap;
-  final String? myMemberId;
+  final Set<String> myMemberIds;
   final String currentUid;
   final String? ownerUid;
   final VoidCallback onChanged;
@@ -268,7 +283,7 @@ class GastosView extends StatefulWidget {
     required this.currentUid,
     required this.ownerUid,
     required this.onChanged,
-    this.myMemberId,
+    required this.myMemberIds,
   });
 
   @override
@@ -304,11 +319,13 @@ class _GastosViewState extends State<GastosView> {
 
     if (choice == null) return;
     try {
-      await FirebaseFunctions.instance.httpsCallable('eliminarGasto').call({
-        'groupId': widget.groupId,
-        'gastoId': gastoId,
-        'eliminarSerie': choice == _DeleteChoice.series,
-      });
+      await IdentityMutationTracker.shared.track(
+        () => FirebaseFunctions.instance.httpsCallable('eliminarGasto').call({
+          'groupId': widget.groupId,
+          'gastoId': gastoId,
+          'eliminarSerie': choice == _DeleteChoice.series,
+        }),
+      );
       widget.onChanged();
     } on FirebaseFunctionsException {
       if (!mounted) return;
@@ -354,7 +371,7 @@ class _GastosViewState extends State<GastosView> {
           itemCount: gastos.length,
           itemBuilder: (context, index) {
             final gasto = gastos[index];
-            final isMyGasto = gasto['pagadoPor'] == widget.myMemberId;
+            final isMyGasto = widget.myMemberIds.contains(gasto['pagadoPor']);
             final canDelete =
                 widget.ownerUid == widget.currentUid ||
                 gasto['createdByUid'] == widget.currentUid;
@@ -437,14 +454,14 @@ enum _DeleteChoice { occurrence, series }
 
 class SaldosView extends StatefulWidget {
   final String groupId;
-  final String? myMemberId;
+  final Set<String> myMemberIds;
   final Map<String, Map<String, dynamic>> memberMap;
 
   const SaldosView({
     super.key,
     required this.groupId,
     required this.memberMap,
-    this.myMemberId,
+    required this.myMemberIds,
   });
 
   @override
@@ -452,84 +469,41 @@ class SaldosView extends StatefulWidget {
 }
 
 class _SaldosViewState extends State<SaldosView> {
-  late final Stream<List<QueryDocumentSnapshot<Map<String, dynamic>>>>
-  _divisionesStream;
+  late final Stream<QuerySnapshot<Map<String, dynamic>>> _divisionesStream;
 
   @override
   void initState() {
     super.initState();
-    _divisionesStream = _watchDivisiones();
+    _divisionesStream = DebtQueries().watchGroupDivisions(widget.groupId);
   }
 
-  Stream<List<QueryDocumentSnapshot<Map<String, dynamic>>>> _watchDivisiones() {
-    final gastosQuery = FirebaseFirestore.instance
-        .collection('groups')
-        .doc(widget.groupId)
-        .collection('gastos');
-    late StreamController<List<QueryDocumentSnapshot<Map<String, dynamic>>>>
-    controller;
-    StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? gastosSubscription;
-    final divisionSubscriptions =
-        <String, StreamSubscription<QuerySnapshot<Map<String, dynamic>>>>{};
-    final divisionsByExpense =
-        <String, List<QueryDocumentSnapshot<Map<String, dynamic>>>>{};
-
-    void emit() {
-      if (!controller.isClosed) {
-        controller.add(
-          divisionsByExpense.values.expand((docs) => docs).toList(),
-        );
-      }
-    }
-
-    controller = StreamController(
-      onListen: () {
-        gastosSubscription = gastosQuery.snapshots().listen((gastos) {
-          final currentIds = gastos.docs.map((doc) => doc.id).toSet();
-          for (final expenseId
-              in divisionSubscriptions.keys
-                  .where((id) => !currentIds.contains(id))
-                  .toList()) {
-            divisionSubscriptions.remove(expenseId)?.cancel();
-            divisionsByExpense.remove(expenseId);
-          }
-
-          for (final gasto in gastos.docs) {
-            if (divisionSubscriptions.containsKey(gasto.id)) continue;
-            divisionSubscriptions[gasto.id] = gasto.reference
-                .collection('divisiones')
-                .snapshots()
-                .listen((divisiones) {
-                  if (!divisionSubscriptions.containsKey(gasto.id)) return;
-                  divisionsByExpense[gasto.id] = divisiones.docs;
-                  emit();
-                }, onError: controller.addError);
-          }
-          emit();
-        }, onError: controller.addError);
-      },
-      onCancel: () async {
-        await gastosSubscription?.cancel();
-        await Future.wait(
-          divisionSubscriptions.values.map((item) => item.cancel()),
-        );
-      },
-    );
-    return controller.stream;
+  double _amount(Map<String, dynamic> data) {
+    final cents = data['cantidadCentimos'];
+    if (cents is num) return cents.toDouble() / 100;
+    return (data['cantidad'] as num?)?.toDouble() ?? 0;
   }
 
   Future<void> _marcarPagado(
     QueryDocumentSnapshot<Map<String, dynamic>> division,
   ) async {
-    final currentMemberId = widget.myMemberId;
+    final data = division.data();
+    final debtorId = data['memberId'] as String?;
+    final payerId = data['pagadoPor'] as String?;
+    final currentMemberId = widget.myMemberIds.contains(debtorId)
+        ? debtorId
+        : widget.myMemberIds.contains(payerId)
+        ? payerId
+        : null;
     if (currentMemberId == null) return;
 
     try {
-      await division.reference.update({
-        'pagado': true,
-        'pagadoEn': FieldValue.serverTimestamp(),
-        'pagoRegistradoPor': currentMemberId,
-      });
+      await IdentityMutationTracker.shared.track(
+        () => division.reference.update({
+          'pagado': true,
+          'pagadoEn': FieldValue.serverTimestamp(),
+          'pagoRegistradoPor': currentMemberId,
+        }),
+      );
     } catch (_) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -563,11 +537,13 @@ class _SaldosViewState extends State<SaldosView> {
     if (confirmed != true) return;
 
     try {
-      await division.reference.update({
-        'pagado': false,
-        'pagadoEn': FieldValue.delete(),
-        'pagoRegistradoPor': FieldValue.delete(),
-      });
+      await IdentityMutationTracker.shared.track(
+        () => division.reference.update({
+          'pagado': false,
+          'pagadoEn': FieldValue.delete(),
+          'pagoRegistradoPor': FieldValue.delete(),
+        }),
+      );
     } catch (_) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -603,7 +579,7 @@ class _SaldosViewState extends State<SaldosView> {
 
   @override
   Widget build(BuildContext context) {
-    return StreamBuilder<List<QueryDocumentSnapshot<Map<String, dynamic>>>>(
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
       stream: _divisionesStream,
       builder: (context, snap) {
         if (snap.connectionState == ConnectionState.waiting) {
@@ -613,15 +589,15 @@ class _SaldosViewState extends State<SaldosView> {
           return Center(child: Text('Error: ${snap.error}'));
         }
 
-        final divisiones = snap.data!;
+        final divisiones = snap.data!.docs;
         final pendientes = divisiones
             .where((division) => division.data()['pagado'] != true)
             .toList();
         final pagosRecibidos = divisiones.where((division) {
           final data = division.data();
           return data['pagado'] == true &&
-              data['pagadoPor'] == widget.myMemberId &&
-              data['memberId'] != widget.myMemberId &&
+              widget.myMemberIds.contains(data['pagadoPor']) &&
+              !widget.myMemberIds.contains(data['memberId']) &&
               data['pagoRegistradoPor'] == data['memberId'];
         }).toList();
 
@@ -634,7 +610,7 @@ class _SaldosViewState extends State<SaldosView> {
         for (var d in pendientes) {
           final data = d.data();
           final memberId = data['memberId'] as String;
-          final amount = (data['cantidad'] as num).toDouble();
+          final amount = _amount(data);
           totals[memberId] = (totals[memberId] ?? 0) + amount;
         }
 
@@ -661,7 +637,7 @@ class _SaldosViewState extends State<SaldosView> {
                     final memberId = data['memberId'] as String;
                     final memberName =
                         widget.memberMap[memberId]?['name'] ?? 'Miembro';
-                    final amount = (data['cantidad'] as num).toDouble();
+                    final amount = _amount(data);
                     final expenseName = data['nombre'] as String? ?? 'Gasto';
 
                     return Card(
@@ -687,16 +663,16 @@ class _SaldosViewState extends State<SaldosView> {
             final memberId = memberIds[i];
             final name = widget.memberMap[memberId]?['name'] ?? 'Sin nombre';
             final balance = totals[memberId] ?? 0.0;
-            final isMe = memberId == widget.myMemberId;
+            final isMe = widget.myMemberIds.contains(memberId);
             final ownPendingDebts = pendientes.where((division) {
               final data = division.data();
-              return data['memberId'] == widget.myMemberId;
+              return data['memberId'] == memberId;
             });
             final debtsOwedToMe = pendientes.where((division) {
               final data = division.data();
               return data['memberId'] == memberId &&
-                  data['pagadoPor'] == widget.myMemberId &&
-                  memberId != widget.myMemberId;
+                  widget.myMemberIds.contains(data['pagadoPor']) &&
+                  !widget.myMemberIds.contains(memberId);
             });
 
             return Column(
@@ -721,7 +697,7 @@ class _SaldosViewState extends State<SaldosView> {
                 if (isMe)
                   ...ownPendingDebts.map((d) {
                     final data = d.data();
-                    final cantidad = (data['cantidad'] as num).toDouble();
+                    final cantidad = _amount(data);
                     final gastoNombre = data['nombre'] ?? 'Gasto';
                     final pagadoPor = data['pagadoPor'] ?? '';
                     final nombrePagador =
@@ -769,7 +745,7 @@ class _SaldosViewState extends State<SaldosView> {
                 if (!isMe)
                   ...debtsOwedToMe.map((division) {
                     final data = division.data();
-                    final amount = (data['cantidad'] as num).toDouble();
+                    final amount = _amount(data);
                     final expenseName = data['nombre'] as String? ?? 'Gasto';
 
                     return Card(

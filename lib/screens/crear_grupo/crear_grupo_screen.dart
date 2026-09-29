@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:payb2/screens/home/main_screen.dart';
+import 'package:payb2/services/auth/identity_mutation_tracker.dart';
 
 class CrearGrupoScreen extends StatefulWidget {
   const CrearGrupoScreen({super.key});
@@ -84,10 +85,12 @@ class CrearGrupoScreenState extends State<CrearGrupoScreen> {
     setState(() => _isSubmitting = true);
     try {
       final callable = FirebaseFunctions.instance.httpsCallable('crearGrupo');
-      await callable.call<Map<String, dynamic>>({
-        ...payload,
-        'requestId': _requestId,
-      });
+      await IdentityMutationTracker.shared.track(
+        () => callable.call<Map<String, dynamic>>({
+          ...payload,
+          'requestId': _requestId,
+        }),
+      );
 
       if (!mounted) return;
 

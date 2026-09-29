@@ -3,7 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:payb2/screens/home/home_screen.dart';
 
 void main() {
-  testWidgets('la pantalla inicial ofrece los dos accesos principales', (
+  testWidgets('la pantalla inicial ofrece grupos y restauración de cuenta', (
     tester,
   ) async {
     await tester.pumpWidget(
@@ -19,6 +19,7 @@ void main() {
     expect(find.text('¡Bienvenido a PayB2!'), findsOneWidget);
     expect(find.text('Crear Grupo'), findsOneWidget);
     expect(find.text('Unirse a Grupo'), findsOneWidget);
+    expect(find.text('Iniciar sesión'), findsOneWidget);
 
     await tester.tap(find.text('Crear Grupo'));
     await tester.pumpAndSettle();

@@ -6,9 +6,6 @@ import 'screens/unirse_grupo/unirse_grupo_screen.dart';
 import 'package:provider/provider.dart';
 import 'providers/theme_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:firebase_messaging/firebase_messaging.dart';
-import 'main.dart'; // para usar flutterLocalNotificationsPlugin
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 class MyApp extends StatefulWidget {
   const MyApp({super.key});
@@ -24,30 +21,6 @@ class _MyAppState extends State<MyApp> {
   void initState() {
     super.initState();
     _initialScreenFuture = _getInitialScreen();
-    _initFirebaseAndMessaging(); // <- importante
-  }
-
-  Future<void> _initFirebaseAndMessaging() async {
-    FirebaseMessaging.onMessage.listen((RemoteMessage message) {
-      final notification = message.notification;
-
-      if (notification != null) {
-        flutterLocalNotificationsPlugin.show(
-          notification.hashCode,
-          notification.title,
-          notification.body,
-          NotificationDetails(
-            android: AndroidNotificationDetails(
-              notificationChannel.id,
-              notificationChannel.name,
-              importance: Importance.max,
-              priority: Priority.high,
-            ),
-            iOS: const DarwinNotificationDetails(),
-          ),
-        );
-      }
-    });
   }
 
   Future<Widget> _getInitialScreen() async {

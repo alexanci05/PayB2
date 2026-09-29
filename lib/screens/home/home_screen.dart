@@ -1,4 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:payb2/screens/account/account_access_sheet.dart';
+import 'package:payb2/screens/home/main_screen.dart';
+import 'package:payb2/services/notifications/notification_service.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -14,6 +19,17 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _onUnirseGrupo(BuildContext context) {
     Navigator.pushNamed(context, '/unirseGrupo');
+  }
+
+  Future<void> _onIniciarSesion(BuildContext context) async {
+    final result = await AccountAccessSheet.show(context);
+    if (result == null || !context.mounted) return;
+
+    unawaited(NotificationService.shared.refreshRegistration());
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => const MainScreen()),
+      (_) => false,
+    );
   }
 
   @override
@@ -46,6 +62,12 @@ class _HomeScreenState extends State<HomeScreen> {
               style: ElevatedButton.styleFrom(
                 minimumSize: const Size.fromHeight(50),
               ),
+            ),
+            const SizedBox(height: 24),
+            TextButton.icon(
+              onPressed: () => _onIniciarSesion(context),
+              icon: const Icon(Icons.login),
+              label: const Text('Iniciar sesión'),
             ),
           ],
         ),

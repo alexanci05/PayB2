@@ -5,10 +5,8 @@ import 'app.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'firebase_options.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
-import 'package:permission_handler/permission_handler.dart';
-import 'package:firebase_messaging/firebase_messaging.dart';
-import 'controladores/registrar_usuario.dart';
+import 'services/auth/account_auth_service.dart';
+import 'services/notifications/notification_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -16,30 +14,24 @@ void main() async {
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
 
   await signAnonymus();
+  try {
+    await AccountAuthService.shared.resumePendingMerge();
+  } catch (error, stackTrace) {
+    debugPrint('No se pudo reanudar la fusión de cuenta: $error\n$stackTrace');
+  }
 
   runApp(MyApp());
 
-  unawaited(_initializeOptionalNotifications());
-}
-
-Future<void> _initializeOptionalNotifications() async {
-  try {
-    await initNotifications();
-    await FirebaseMessaging.instance.requestPermission();
-    await _registerMessagingToken();
-  } catch (error, stackTrace) {
-    debugPrint(
-      'No se pudieron inicializar las notificaciones: $error\n$stackTrace',
-    );
-  }
-}
-
-Future<void> _registerMessagingToken() async {
-  try {
-    await registerUserForNotifications();
-  } catch (error, stackTrace) {
-    debugPrint('No se pudo registrar el token FCM: $error\n$stackTrace');
-  }
+  unawaited(
+    NotificationService.shared.initialize().catchError((
+      Object error,
+      StackTrace stackTrace,
+    ) {
+      debugPrint(
+        'No se pudieron inicializar las notificaciones: $error\n$stackTrace',
+      );
+    }),
+  );
 }
 
 // Para login anónimo
@@ -49,54 +41,4 @@ Future<void> signAnonymus() async {
   if (auth.currentUser == null) {
     await auth.signInAnonymously();
   }
-}
-
-// Plugin de notificaciones locales (global)
-final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
-    FlutterLocalNotificationsPlugin();
-const AndroidNotificationChannel notificationChannel =
-    AndroidNotificationChannel(
-      'canal_notificaciones',
-      'Notificaciones',
-      importance: Importance.high,
-    );
-
-// Inicializa notificaciones locales
-Future<void> initNotifications() async {
-  const AndroidInitializationSettings androidSettings =
-      AndroidInitializationSettings('@mipmap/ic_launcher');
-
-  final DarwinInitializationSettings iosSettings = DarwinInitializationSettings(
-    requestAlertPermission: true,
-    requestBadgePermission: true,
-    requestSoundPermission: true,
-  );
-
-  final InitializationSettings initSettings = InitializationSettings(
-    android: androidSettings,
-    iOS: iosSettings,
-  );
-
-  await flutterLocalNotificationsPlugin.initialize(initSettings);
-  await flutterLocalNotificationsPlugin
-      .resolvePlatformSpecificImplementation<
-        AndroidFlutterLocalNotificationsPlugin
-      >()
-      ?.createNotificationChannel(notificationChannel);
-
-  await _requestNotificationPermission();
-}
-
-// Pide permisos para notificaciones (Android 13+ y iOS)
-Future<void> _requestNotificationPermission() async {
-  if (await Permission.notification.isDenied ||
-      await Permission.notification.isPermanentlyDenied) {
-    await Permission.notification.request();
-  }
-
-  await flutterLocalNotificationsPlugin
-      .resolvePlatformSpecificImplementation<
-        IOSFlutterLocalNotificationsPlugin
-      >()
-      ?.requestPermissions(alert: true, badge: true, sound: true);
 }

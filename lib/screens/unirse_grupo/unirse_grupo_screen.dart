@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:payb2/screens/home/main_screen.dart';
+import 'package:payb2/services/auth/identity_mutation_tracker.dart';
 
 class UnirseGrupoScreen extends StatefulWidget {
   const UnirseGrupoScreen({super.key});
@@ -26,9 +27,9 @@ class UnirseGrupoScreenState extends State<UnirseGrupoScreen> {
 
     try {
       final callable = FirebaseFunctions.instance.httpsCallable('unirseAGrupo');
-      final response = await callable.call<Map<String, dynamic>>({
-        'codigo': codigoGrupo,
-      });
+      final response = await IdentityMutationTracker.shared.track(
+        () => callable.call<Map<String, dynamic>>({'codigo': codigoGrupo}),
+      );
 
       if (!mounted) return;
 

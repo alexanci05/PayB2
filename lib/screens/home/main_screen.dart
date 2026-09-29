@@ -2,11 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_speed_dial/flutter_speed_dial.dart'; // Biblioteca para el botón flotante con múltiples opciones
 import 'package:payb2/screens/grupo_detalles/grupo_detalle_screen.dart';
-import 'package:provider/provider.dart';
-import 'package:payb2/providers/theme_provider.dart';
-import 'package:collection/collection.dart'; // para firstWhereOrNull
+import 'package:payb2/screens/settings/settings_screen.dart';
+import 'package:payb2/services/auth/identity_mutation_tracker.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:intl/intl.dart';
+import 'package:payb2/services/debts/debt_queries.dart';
 
 // Pantalla principal cuando se pertenece a un grupo
 
@@ -21,6 +21,13 @@ class _MainScreenState extends State<MainScreen> {
   int _selectedIndex = 0;
   int _walletRevision = 0;
 
+  void _onAccountRestored() {
+    setState(() {
+      _selectedIndex = 0;
+      _walletRevision++;
+    });
+  }
+
   void _onItemTapped(int index) {
     setState(() {
       _selectedIndex = index;
@@ -32,7 +39,7 @@ class _MainScreenState extends State<MainScreen> {
     return switch (_selectedIndex) {
       0 => const GroupsScreen(),
       1 => WalletScreen(key: ValueKey(_walletRevision)),
-      _ => const SettingsScreen(),
+      _ => SettingsScreen(onAccountRestored: _onAccountRestored),
     };
   }
 
@@ -215,6 +222,7 @@ class WalletScreen extends StatefulWidget {
 
 class _WalletScreenState extends State<WalletScreen> {
   late Future<List<_DebtItem>> _futureDebts;
+  final _debtQueries = DebtQueries();
 
   @override
   void initState() {
@@ -249,90 +257,60 @@ class _WalletScreenState extends State<WalletScreen> {
 
     final debts = <_DebtItem>[];
 
-    // 2) Por cada grupo...
     for (final gid in groupIds) {
-      // a) Recupera nombre de grupo
-      final groupDoc = await FirebaseFirestore.instance
-          .collection('groups')
-          .doc(gid)
-          .get();
+      final groupRef = FirebaseFirestore.instance.collection('groups').doc(gid);
+      final results = await Future.wait([
+        groupRef.get(),
+        groupRef.collection('members').get(),
+      ]);
+      final groupDoc = results[0] as DocumentSnapshot<Map<String, dynamic>>;
+      final membersSnap = results[1] as QuerySnapshot<Map<String, dynamic>>;
       final groupName = groupDoc['name'] as String? ?? 'Grupo';
-
-      // b) Cargamos todos los miembros de ese grupo y creamos memberMap
-      final membersSnap = await FirebaseFirestore.instance
-          .collection('groups')
-          .doc(gid)
-          .collection('members')
-          .get();
       final Map<String, String> memberMap = {
         for (var m in membersSnap.docs)
           m.id: (m.data()['name'] as String? ?? '—'),
       };
 
-      // c) Intentamos encontrar el usuario fantasma
-      final phantomSnap = membersSnap.docs.firstWhereOrNull(
-        (m) => (m.data()['reclamadoPor'] as String?) == uid,
+      final myMemberIds = membersSnap.docs
+          .where((m) => (m.data()['reclamadoPor'] as String?) == uid)
+          .map((member) => member.id)
+          .toSet();
+      final pendingDivisions = await _debtQueries.loadPendingForMembers(
+        gid,
+        myMemberIds,
       );
 
-      if (phantomSnap == null) {
-        continue;
-      }
-
-      final phantomId = phantomSnap.id;
-
-      // d) Recorre todos los gastos
-      final gastosSnap = await FirebaseFirestore.instance
-          .collection('groups')
-          .doc(gid)
-          .collection('gastos')
-          .get();
-
-      for (final gastoDoc in gastosSnap.docs) {
-        final gastoData = gastoDoc.data();
-        final gastoName = gastoData['nombre'] as String? ?? 'Gasto';
-        final pagadoPorId = gastoData['pagadoPor'] as String? ?? '';
-
-        // e) Busca en splits solo tu parte
-        final splitsSnap = await gastoDoc.reference
-            .collection('divisiones')
-            .where('memberId', isEqualTo: phantomId)
-            .get();
-
-        for (final splitDoc in splitsSnap.docs) {
-          final splitData = splitDoc.data();
-          final amount = _readDebtAmount(splitData);
-          final gastoFecha = gastoData['fecha'];
-          final splitFecha = splitData['fecha'];
-          final timestamp = gastoFecha is Timestamp
-              ? gastoFecha
-              : splitFecha is Timestamp
-              ? splitFecha
-              : null;
-          final fecha = timestamp != null
-              ? DateFormat('dd/MM/yyyy').format(timestamp.toDate())
-              : 'Sin fecha';
-
-          // Solo si debes y no eres tú quien pagó
-          if (splitData['pagado'] != true &&
-              amount != null &&
-              amount > 0 &&
-              pagadoPorId != phantomId) {
-            debts.add(
-              _DebtItem(
-                groupId: gid,
-                groupName: groupName,
-                gastoId: gastoDoc.id,
-                splitDocId: splitDoc.id,
-                gastoName: gastoName,
-                amount: amount,
-                pagadoPorId: pagadoPorId,
-                pagadoPorName: memberMap[pagadoPorId] ?? 'Otro',
-                myPhantomId: phantomId,
-                fecha: fecha,
-              ),
-            );
-          }
+      for (final splitDoc in pendingDivisions) {
+        final splitData = splitDoc.data();
+        final memberId = splitData['memberId'] as String?;
+        final payerId = splitData['pagadoPor'] as String? ?? '';
+        final amount = _readDebtAmount(splitData);
+        final timestamp = splitData['fecha'] as Timestamp?;
+        final expenseRef = splitDoc.reference.parent.parent;
+        if (memberId == null ||
+            expenseRef == null ||
+            amount == null ||
+            amount <= 0 ||
+            payerId == memberId) {
+          continue;
         }
+
+        debts.add(
+          _DebtItem(
+            groupId: gid,
+            groupName: groupName,
+            gastoId: expenseRef.id,
+            splitDocId: splitDoc.id,
+            gastoName: splitData['nombre'] as String? ?? 'Gasto',
+            amount: amount,
+            pagadoPorId: payerId,
+            pagadoPorName: memberMap[payerId] ?? 'Otro',
+            myPhantomId: memberId,
+            fecha: timestamp != null
+                ? DateFormat('dd/MM/yyyy').format(timestamp.toDate())
+                : 'Sin fecha',
+          ),
+        );
       }
     }
 
@@ -341,18 +319,20 @@ class _WalletScreenState extends State<WalletScreen> {
 
   Future<void> _markDebtPaid(_DebtItem debt) async {
     try {
-      await FirebaseFirestore.instance
-          .collection('groups')
-          .doc(debt.groupId)
-          .collection('gastos')
-          .doc(debt.gastoId)
-          .collection('divisiones')
-          .doc(debt.splitDocId)
-          .update({
-            'pagado': true,
-            'pagadoEn': FieldValue.serverTimestamp(),
-            'pagoRegistradoPor': debt.myPhantomId,
-          });
+      await IdentityMutationTracker.shared.track(
+        () => FirebaseFirestore.instance
+            .collection('groups')
+            .doc(debt.groupId)
+            .collection('gastos')
+            .doc(debt.gastoId)
+            .collection('divisiones')
+            .doc(debt.splitDocId)
+            .update({
+              'pagado': true,
+              'pagadoEn': FieldValue.serverTimestamp(),
+              'pagoRegistradoPor': debt.myPhantomId,
+            }),
+      );
 
       if (!mounted) return;
       setState(() {
@@ -451,22 +431,6 @@ class _DebtItem {
     required this.myPhantomId,
     required this.fecha,
   });
-}
-
-class SettingsScreen extends StatelessWidget {
-  const SettingsScreen({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: ElevatedButton(
-        onPressed: () {
-          Provider.of<ThemeProvider>(context, listen: false).toggleTheme();
-        },
-        child: const Text('Cambiar tema'),
-      ),
-    );
-  }
 }
 
 Future<String> getUid() async {
