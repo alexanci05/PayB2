@@ -12,10 +12,14 @@ const {
   deleteField,
   deleteDoc,
   doc,
+  collectionGroup,
+  getDocs,
   getDoc,
+  query,
   serverTimestamp,
   setDoc,
   updateDoc,
+  where,
 } = require('firebase/firestore');
 
 let testEnv;
@@ -100,6 +104,22 @@ test('un miembro puede leer su grupo y un usuario ajeno no', async () => {
 
   await assertSucceeds(getDoc(doc(memberDb, 'groups/group-1')));
   await assertFails(getDoc(doc(outsiderDb, 'groups/group-1')));
+});
+
+test('un miembro puede consultar las divisiones de su grupo', async () => {
+  const memberDb = testEnv.authenticatedContext('debtor-uid').firestore();
+  const outsiderDb = testEnv.authenticatedContext('outsider-uid').firestore();
+  const memberQuery = query(
+    collectionGroup(memberDb, 'divisiones'),
+    where('groupId', '==', 'group-1'),
+  );
+  const outsiderQuery = query(
+    collectionGroup(outsiderDb, 'divisiones'),
+    where('groupId', '==', 'group-1'),
+  );
+
+  await assertSucceeds(getDocs(memberQuery));
+  await assertFails(getDocs(outsiderQuery));
 });
 
 test('el propietario puede renombrar su grupo con un nombre valido', async () => {
@@ -246,6 +266,26 @@ test('el acreedor puede devolver un pago a pendiente', async () => {
       pagado: false,
       pagadoEn: deleteField(),
       pagoRegistradoPor: deleteField(),
+    }),
+  );
+});
+
+test('una cuenta en proceso de fusion no puede escribir', async () => {
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    await setDoc(doc(context.firestore(), 'accountMerges/creditor-uid'), {
+      sourceUid: 'creditor-uid',
+      status: 'prepared',
+    });
+  });
+  const db = testEnv.authenticatedContext('creditor-uid').firestore();
+
+  await assertFails(updateDoc(doc(db, 'groups/group-1'), { name: 'Bloqueado' }));
+  await assertFails(setDoc(doc(db, 'usuarios/creditor-uid'), { fcmToken: 'token' }));
+  await assertFails(
+    updateDoc(debtRef(db), {
+      pagado: true,
+      pagadoEn: serverTimestamp(),
+      pagoRegistradoPor: 'creditor',
     }),
   );
 });

@@ -12,6 +12,14 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
   const { getFirestore, Timestamp } = require('firebase-admin/firestore');
   const { getMessaging } = require('firebase-admin/messaging');
   const entryPoints = require('../index');
+  const {
+    AccountMergeConflictError,
+    activateAccountMerge,
+    cancelAccountMerge,
+    completeAccountMerge,
+    mergeAnonymousAccountData,
+    prepareAccountMerge,
+  } = require('../lib/account-merge');
   const db = getFirestore();
   const projectId = process.env.GCLOUD_PROJECT;
 
@@ -80,12 +88,27 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
   }
 
   async function assertNoExpenseWrites(groupRef) {
-    const [expenses, schedules] = await Promise.all([
+    const [expenses, schedules, requests] = await Promise.all([
       groupRef.collection('gastos').get(),
       groupRef.collection('gastosProgramados').get(),
+      groupRef.collection('expenseRequests').get(),
     ]);
     assert.equal(expenses.size, 0);
     assert.equal(schedules.size, 0);
+    assert.equal(requests.size, 0);
+  }
+
+  async function assertNoGroupCreationWrites() {
+    const [groups, codes, memberships, requests] = await Promise.all([
+      db.collection('groups').get(),
+      db.collection('groupCodes').get(),
+      db.collection('groupMembers').get(),
+      db.collection('groupCreationRequests').get(),
+    ]);
+    assert.equal(groups.size, 0);
+    assert.equal(codes.size, 0);
+    assert.equal(memberships.size, 0);
+    assert.equal(requests.size, 0);
   }
 
   async function assertSingleCreatedGroup(result) {
@@ -124,6 +147,20 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     assert.equal(code.data().groupId, result.groupId);
     assert.deepEqual(membership.data().groupId, result.groupId);
     assert.deepEqual(members.docs.map((member) => member.data().name), ['Ana', 'Luis']);
+  });
+
+  test('crearGrupo rejects more than 50 members without creating documents', async () => {
+    const miembros = Array.from({ length: 51 }, (_, index) => `Miembro ${index + 1}`);
+
+    await assert.rejects(
+      entryPoints.crearGrupo.run(
+        { requestId: db.collection('groups').doc().id, nombre: 'Viaje', miembros },
+        { auth: { uid: 'owner-uid' } },
+      ),
+      { code: 'invalid-argument' },
+    );
+
+    await assertNoGroupCreationWrites();
   });
 
   test('crearGrupo replays the same request with one group, code and membership', async () => {
@@ -191,6 +228,145 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     assert.deepEqual(joined, { status: 'joined', groupId: 'group-1' });
     assert.deepEqual(repeated, { status: 'already-member', groupId: 'group-1' });
     assert.equal((await db.collection('groupMembers').doc('group-1_member-uid').get()).exists, true);
+  });
+
+  test('account merge preserves the union of groups and ownership', async () => {
+    const oldGroup = db.collection('groups').doc('old-group');
+    const newGroup = db.collection('groups').doc('new-group');
+    await Promise.all([
+      oldGroup.set({ name: 'Antiguo', ownerDeviceId: 'target-uid' }),
+      db.collection('groupMembers').doc('old-group_target-uid').set({
+        groupId: 'old-group', deviceId: 'target-uid', memberId: 'old-member',
+      }),
+      oldGroup.collection('members').doc('old-member').set({
+        name: 'Ana', reclamadoPor: 'target-uid',
+      }),
+      newGroup.set({ name: 'Nuevo', ownerDeviceId: 'source-uid' }),
+      db.collection('groupMembers').doc('new-group_source-uid').set({
+        groupId: 'new-group', deviceId: 'source-uid', memberId: 'new-member',
+      }),
+      newGroup.collection('members').doc('new-member').set({
+        name: 'Ana', reclamadoPor: 'source-uid',
+      }),
+      newGroup.collection('gastos').doc('expense').set({ createdByUid: 'source-uid' }),
+      newGroup.collection('gastosProgramados').doc('schedule').set({ createdByUid: 'source-uid' }),
+      newGroup.collection('expenseRequests').doc('request').set({ createdByUid: 'source-uid' }),
+      db.collection('usuarios').doc('source-uid').set({ deviceId: 'source-uid', fcmToken: 'token' }),
+    ]);
+
+    assert.deepEqual(
+      await mergeAnonymousAccountData(db, 'source-uid', 'target-uid'),
+      { mergedGroups: 1 },
+    );
+
+    const [oldMembership, newMembership, sourceMembership, group, member, expense, schedule, request, user] =
+      await Promise.all([
+        db.collection('groupMembers').doc('old-group_target-uid').get(),
+        db.collection('groupMembers').doc('new-group_target-uid').get(),
+        db.collection('groupMembers').doc('new-group_source-uid').get(),
+        newGroup.get(),
+        newGroup.collection('members').doc('new-member').get(),
+        newGroup.collection('gastos').doc('expense').get(),
+        newGroup.collection('gastosProgramados').doc('schedule').get(),
+        newGroup.collection('expenseRequests').doc('request').get(),
+        db.collection('usuarios').doc('target-uid').get(),
+      ]);
+    assert.equal(oldMembership.exists, true);
+    assert.equal(newMembership.get('deviceId'), 'target-uid');
+    assert.equal(newMembership.get('memberId'), 'new-member');
+    assert.equal(sourceMembership.exists, false);
+    assert.equal(group.get('ownerDeviceId'), 'target-uid');
+    assert.equal(member.get('reclamadoPor'), 'target-uid');
+    assert.equal(expense.get('createdByUid'), 'target-uid');
+    assert.equal(schedule.get('createdByUid'), 'target-uid');
+    assert.equal(request.get('createdByUid'), 'target-uid');
+    assert.equal(user.get('deviceId'), 'target-uid');
+    assert.equal(user.get('fcmToken'), 'token');
+  });
+
+  test('merge ticket locks the source and can only be completed by one target', async () => {
+    const group = db.collection('groups').doc('ticket-group');
+    await Promise.all([
+      group.set({ name: 'Nuevo', ownerDeviceId: 'source-uid' }),
+      db.collection('groupMembers').doc('ticket-group_source-uid').set({
+        groupId: 'ticket-group', deviceId: 'source-uid', memberId: 'source-member',
+      }),
+      group.collection('members').doc('source-member').set({
+        name: 'Ana', reclamadoPor: 'source-uid',
+      }),
+    ]);
+
+    const ticket = await prepareAccountMerge(db, 'source-uid');
+    await activateAccountMerge(db, 'source-uid', ticket);
+    await assert.rejects(
+      entryPoints.crearGrupo.run(
+        { requestId: db.collection('groups').doc().id, nombre: 'Bloqueado', miembros: ['Ana'] },
+        { auth: { uid: 'source-uid' } },
+      ),
+      (error) => error.code === 'failed-precondition',
+    );
+
+    await completeAccountMerge(db, ticket, 'target-uid');
+    await assert.rejects(
+      completeAccountMerge(db, ticket, 'other-target-uid'),
+      AccountMergeConflictError,
+    );
+    assert.equal(
+      (await db.collection('groupMembers').doc('ticket-group_target-uid').get()).exists,
+      true,
+    );
+  });
+
+  test('a prepared merge can be canceled before changing accounts', async () => {
+    const ticket = await prepareAccountMerge(db, 'source-uid');
+    await cancelAccountMerge(db, 'source-uid', ticket);
+
+    assert.equal((await db.collection('accountMerges').doc('source-uid').get()).exists, false);
+    const created = await entryPoints.crearGrupo.run(
+      { requestId: db.collection('groups').doc().id, nombre: 'Disponible', miembros: ['Ana'] },
+      { auth: { uid: 'source-uid' } },
+    );
+    assert.ok(created.groupId);
+  });
+
+  test('account merge keeps both identities when accounts share a group', async () => {
+    const group = db.collection('groups').doc('shared-group');
+    await Promise.all([
+      group.set({ name: 'Compartido', ownerDeviceId: 'owner-uid' }),
+      db.collection('groupMembers').doc('shared-group_source-uid').set({
+        groupId: 'shared-group', deviceId: 'source-uid', memberId: 'source-member',
+      }),
+      db.collection('groupMembers').doc('shared-group_target-uid').set({
+        groupId: 'shared-group', deviceId: 'target-uid', memberId: 'target-member',
+      }),
+      group.collection('members').doc('source-member').set({
+        name: 'Móvil', reclamadoPor: 'source-uid',
+      }),
+      group.collection('members').doc('target-member').set({
+        name: 'Cuenta', reclamadoPor: 'target-uid',
+      }),
+    ]);
+
+    await mergeAnonymousAccountData(db, 'source-uid', 'target-uid');
+    await mergeAnonymousAccountData(db, 'source-uid', 'target-uid');
+
+    const [membership, sourceMember, targetMember] = await Promise.all([
+      db.collection('groupMembers').doc('shared-group_target-uid').get(),
+      group.collection('members').doc('source-member').get(),
+      group.collection('members').doc('target-member').get(),
+    ]);
+    assert.equal(membership.get('memberId'), 'target-member');
+    assert.equal(sourceMember.get('reclamadoPor'), 'target-uid');
+    assert.equal(targetMember.get('reclamadoPor'), 'target-uid');
+  });
+
+  test('account merge cannot redirect the same anonymous session to another account', async () => {
+    await mergeAnonymousAccountData(db, 'source-uid', 'target-uid');
+
+    await assert.rejects(
+      mergeAnonymousAccountData(db, 'source-uid', 'different-target-uid'),
+      AccountMergeConflictError,
+    );
   });
 
   test('reclamarMiembro claims an identity and records it on the membership', async () => {
@@ -562,6 +738,21 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     }
   });
 
+  test('crearGasto rejects more than 49 participants without creating documents', async () => {
+    const groupRef = await seedExpenseGroup();
+    const participantes = Array.from({ length: 50 }, (_, index) => `member-${index + 1}`);
+
+    await assert.rejects(
+      entryPoints.crearGasto.run(
+        expenseInput({ participantes }),
+        { auth: { uid: 'payer-uid' } },
+      ),
+      { code: 'invalid-argument' },
+    );
+
+    await assertNoExpenseWrites(groupRef);
+  });
+
   test('eliminarGasto removes an expense and every division but can preserve its series', async () => {
     const groupRef = await seedExpenseGroup();
     const created = await entryPoints.crearGasto.run(
@@ -649,6 +840,30 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     );
   });
 
+  test('ejecutarGastosPeriodicos does not write with an account being merged', async () => {
+    const groupRef = db.collection('groups').doc('locked-group');
+    const scheduleRef = groupRef.collection('gastosProgramados').doc('schedule-1');
+    await Promise.all([
+      groupRef.set({ name: 'Viaje' }),
+      scheduleRef.set({
+        nombre: 'Alquiler',
+        cantidadCentimos: 1000,
+        pagadoPor: 'payer',
+        participantes: ['debtor'],
+        proximaFecha: Timestamp.fromMillis(Date.now() - 1000),
+        frecuencia: 'Cada 7 días',
+        createdByMemberId: 'payer',
+        createdByUid: 'source-uid',
+      }),
+      db.collection('accountMerges').doc('source-uid').set({
+        sourceUid: 'source-uid', status: 'running',
+      }),
+    ]);
+
+    await assert.rejects(entryPoints.ejecutarGastosPeriodicos.run({}), AggregateError);
+    assert.equal((await groupRef.collection('gastos').get()).empty, true);
+  });
+
   test('onDeudaPagada sends the creditor a notification when a debtor pays', async () => {
     await Promise.all([
       db.collection('groups').doc('group-1').collection('members').doc('creditor').set({ reclamadoPor: 'creditor-uid' }),
@@ -697,12 +912,18 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
       db.collection('groups').doc('group-1').collection('members').doc('debtor').set({
         reclamadoPor: 'debtor-uid',
       }),
+      db.collection('groups').doc('group-1').collection('members').doc('aaa-identity').set({
+        reclamadoPor: 'debtor-uid',
+      }),
       db.collection('groups').doc('group-1').collection('gastos').doc('expense-1').set({
         pagadoPor: 'creditor',
       }),
       db.collection('groups').doc('group-1').collection('gastos').doc('expense-1').collection('divisiones').doc('debtor').set({
+        groupId: 'group-1',
         memberId: 'debtor',
+        pagadoPor: 'creditor',
         pagado: false,
+        cantidadCentimos: 1250,
         cantidad: 12.50,
       }),
     ]);
@@ -712,6 +933,7 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     messaging.send = async (message) => sent.push(message);
 
     try {
+      await entryPoints.recordatorioDeudas.run({});
       await entryPoints.recordatorioDeudas.run({});
     } finally {
       messaging.send = originalSend;
@@ -724,5 +946,6 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
         body: 'Tienes deudas pendientes en la app.',
       },
     }]);
+    assert.equal((await db.collection('reminderDeliveries').get()).size, 1);
   });
 }

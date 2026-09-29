@@ -15,7 +15,117 @@ const {
   divisionId,
 } = require('./lib/scheduled-occurrences');
 const { debtNotificationForTransition } = require('./lib/debt-notifications');
+const {
+  AccountMergeConflictError,
+  activateAccountMerge,
+  cancelAccountMerge,
+  completeAccountMerge,
+  prepareAccountMerge,
+} = require('./lib/account-merge');
 const MAX_OCCURRENCES_PER_SCHEDULE_RUN = 100;
+
+function reminderPeriod(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/Madrid',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+async function assertAccountCanMutate(transaction, uid) {
+  const merge = await transaction.get(db.collection('accountMerges').doc(uid));
+  if (merge.exists) {
+    throw new functions.https.HttpsError(
+      'failed-precondition',
+      'La cuenta está terminando un inicio de sesión',
+    );
+  }
+}
+
+exports.prepararFusionCuenta = functions.https.onCall(async (_data, context) => {
+  if (!context.auth) {
+    throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesión');
+  }
+  if (context.auth.token.firebase?.sign_in_provider !== 'anonymous') {
+    throw new functions.https.HttpsError(
+      'failed-precondition',
+      'La cuenta de origen no es anónima',
+    );
+  }
+
+  try {
+    return { mergeTicket: await prepareAccountMerge(db, context.auth.uid) };
+  } catch (error) {
+    if (error instanceof AccountMergeConflictError) {
+      throw new functions.https.HttpsError('failed-precondition', error.message);
+    }
+    throw new functions.https.HttpsError('internal', 'No se pudo preparar la fusión');
+  }
+});
+
+exports.cancelarFusionCuenta = functions.https.onCall(async (data, context) => {
+  if (!context.auth || context.auth.token.firebase?.sign_in_provider !== 'anonymous') {
+    throw new functions.https.HttpsError('unauthenticated', 'La sesión anónima no está activa');
+  }
+  const mergeTicket = data?.mergeTicket;
+  if (typeof mergeTicket !== 'string' || mergeTicket.length < 40) {
+    throw new functions.https.HttpsError('invalid-argument', 'El ticket de fusión no es válido');
+  }
+  try {
+    await cancelAccountMerge(db, context.auth.uid, mergeTicket);
+    return { canceled: true };
+  } catch (error) {
+    if (error instanceof AccountMergeConflictError) {
+      throw new functions.https.HttpsError('failed-precondition', error.message);
+    }
+    throw new functions.https.HttpsError('internal', 'No se pudo cancelar la fusión');
+  }
+});
+
+exports.bloquearFusionCuenta = functions.https.onCall(async (data, context) => {
+  if (!context.auth || context.auth.token.firebase?.sign_in_provider !== 'anonymous') {
+    throw new functions.https.HttpsError('unauthenticated', 'La sesión anónima no está activa');
+  }
+  const mergeTicket = data?.mergeTicket;
+  if (typeof mergeTicket !== 'string' || mergeTicket.length < 40) {
+    throw new functions.https.HttpsError('invalid-argument', 'El ticket de fusión no es válido');
+  }
+  try {
+    await activateAccountMerge(db, context.auth.uid, mergeTicket);
+    return { active: true };
+  } catch (error) {
+    if (error instanceof AccountMergeConflictError) {
+      throw new functions.https.HttpsError('failed-precondition', error.message);
+    }
+    throw new functions.https.HttpsError('internal', 'No se pudo bloquear la sesión anónima');
+  }
+});
+
+exports.fusionarCuentaAnonima = functions.https.onCall(async (data, context) => {
+  if (!context.auth) {
+    throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesión');
+  }
+  if (context.auth.token.firebase?.sign_in_provider === 'anonymous') {
+    throw new functions.https.HttpsError('failed-precondition', 'La cuenta de destino no es válida');
+  }
+  const mergeTicket = data?.mergeTicket;
+  if (typeof mergeTicket !== 'string' || mergeTicket.length < 40) {
+    throw new functions.https.HttpsError('invalid-argument', 'El ticket de fusión no es válido');
+  }
+
+  try {
+    return await completeAccountMerge(db, mergeTicket, context.auth.uid);
+  } catch (error) {
+    console.error('No se pudo fusionar la cuenta anónima', { targetUid: context.auth.uid, error });
+    if (error instanceof AccountMergeConflictError) {
+      throw new functions.https.HttpsError('failed-precondition', error.message);
+    }
+    throw new functions.https.HttpsError('internal', 'No se pudieron conservar los datos de la sesión');
+  }
+});
 
 exports.crearGrupo = functions.https.onCall(async (data, context) => {
   if (!context.auth) {
@@ -44,14 +154,18 @@ exports.crearGrupo = functions.https.onCall(async (data, context) => {
   const uid = context.auth.uid;
   const groupRef = db.collection("groups").doc();
   const requestRef = db.collection('groupCreationRequests').doc(`${uid}_${requestId}`);
-  const fingerprint = createHash('sha256').update(JSON.stringify([uid, nombre, memberNames])).digest('hex');
+  const fingerprint = createHash('sha256').update(JSON.stringify([nombre, memberNames])).digest('hex');
 
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const groupCode = createGroupCode();
     const result = await db.runTransaction(async (transaction) => {
+      await assertAccountCanMutate(transaction, uid);
       const requestSnap = await transaction.get(requestRef);
       if (requestSnap.exists) {
-        if (requestSnap.get('fingerprint') !== fingerprint) {
+        const legacyFingerprint = createHash('sha256').update(JSON.stringify([
+          requestSnap.get('mergedFromUid') ?? uid, nombre, memberNames,
+        ])).digest('hex');
+        if (![fingerprint, legacyFingerprint].includes(requestSnap.get('fingerprint'))) {
           throw new functions.https.HttpsError('failed-precondition', 'Esta solicitud ya se usó para otro grupo');
         }
         return { groupId: requestSnap.get('groupId'), groupCode: requestSnap.get('groupCode') };
@@ -118,6 +232,7 @@ exports.reclamarMiembro = functions.https.onCall(async (data, context) => {
   const membershipRef = db.collection('groupMembers').doc(`${groupId}_${uid}`);
   const memberRef = groupRef.collection('members').doc(memberId);
   return db.runTransaction(async (transaction) => {
+    await assertAccountCanMutate(transaction, uid);
     const [groupSnap, membershipSnap, memberSnap] = await transaction.getAll(
       groupRef, membershipRef, memberRef,
     );
@@ -197,15 +312,21 @@ exports.crearGasto = functions.https.onCall(async (data, context) => {
   const expenseTimestamp = Timestamp.fromDate(expenseDate);
   const uid = context.auth.uid;
   const requestRef = groupRef.collection('expenseRequests').doc(requestId);
-  const fingerprint = createHash('sha256').update(JSON.stringify([
-    uid, nombre.trim(), descripcion.trim(), cantidadCentimos, fecha,
+  const fingerprintPayload = [
+    nombre.trim(), descripcion.trim(), cantidadCentimos, fecha,
     pagadoPor, [...participantes].sort(), frecuencia ?? null, timeZoneOffsetMinutes,
-  ])).digest('hex');
+  ];
+  const fingerprint = createHash('sha256').update(JSON.stringify(fingerprintPayload)).digest('hex');
 
   return db.runTransaction(async (transaction) => {
+    await assertAccountCanMutate(transaction, uid);
     const requestSnap = await transaction.get(requestRef);
     if (requestSnap.exists) {
-      if (requestSnap.get('fingerprint') !== fingerprint || requestSnap.get('createdByUid') !== uid) {
+      const legacyFingerprint = createHash('sha256').update(JSON.stringify([
+        requestSnap.get('mergedFromUid') ?? uid, ...fingerprintPayload,
+      ])).digest('hex');
+      if (![fingerprint, legacyFingerprint].includes(requestSnap.get('fingerprint')) ||
+          requestSnap.get('createdByUid') !== uid) {
         throw new functions.https.HttpsError('failed-precondition', 'Esta solicitud ya se usó para otro gasto');
       }
       return { gastoId: requestSnap.get('gastoId'), scheduleId: requestSnap.get('scheduleId') };
@@ -276,6 +397,7 @@ exports.eliminarGasto = functions.https.onCall(async (data, context) => {
   const groupRef = db.collection('groups').doc(groupId);
   const expenseRef = groupRef.collection('gastos').doc(gastoId);
   return db.runTransaction(async (transaction) => {
+    await assertAccountCanMutate(transaction, uid);
     const [groupSnap, expenseSnap, divisionsSnap] = await Promise.all([
       transaction.get(groupRef),
       transaction.get(expenseRef),
@@ -313,6 +435,7 @@ exports.unirseAGrupo = functions.https.onCall(async (data, context) => {
   const uid = context.auth.uid;
   const attemptsRef = db.collection("joinAttempts").doc(uid);
   const result = await db.runTransaction(async (transaction) => {
+    await assertAccountCanMutate(transaction, uid);
     const now = Timestamp.now();
     const attemptsSnap = await transaction.get(attemptsRef);
     const attempts = attemptsSnap.data() || {};
@@ -469,6 +592,7 @@ async function generarOcurrenciaProgramada({ db, groupId, scheduleRef, now }) {
     }
 
     const schedule = scheduleSnap.data();
+    await assertAccountCanMutate(transaction, schedule.createdByUid);
     const scheduledAt = schedule.proximaFecha;
     if (!scheduledAt || typeof scheduledAt.toDate !== "function" || typeof scheduledAt.toMillis !== "function") {
       throw new TypeError("proximaFecha debe ser un Timestamp de Firestore");
@@ -547,12 +671,51 @@ exports.recordatorioDeudas = functions.pubsub
       console.log("Inicio de recordatorioDeudas");
       const deliveryFailures = [];
 
-      // 1. Leer TODOS los usuarios
-      const usuariosSnap = await db
-        .collection("usuarios")
-        .get();
+      const [usuariosSnap, membershipsSnap] = await Promise.all([
+        db.collection("usuarios").get(),
+        db.collection("groupMembers").get(),
+      ]);
 
       console.log(`Usuarios encontrados: ${usuariosSnap.size}`);
+      const period = reminderPeriod();
+
+      const accountUidsByGroup = new Map();
+      for (const membership of membershipsSnap.docs) {
+        const groupId = membership.get('groupId');
+        const uid = membership.get('deviceId');
+        if (typeof groupId !== 'string' || typeof uid !== 'string') continue;
+        const groupUids = accountUidsByGroup.get(groupId) ?? new Set();
+        groupUids.add(uid);
+        accountUidsByGroup.set(groupId, groupUids);
+      }
+
+      const debtorUids = new Set();
+      for (const [groupId, groupUids] of accountUidsByGroup) {
+        const [members, pendingDivisions] = await Promise.all([
+          db.collection('groups').doc(groupId).collection('members').get(),
+          db.collectionGroup('divisiones')
+            .where('groupId', '==', groupId)
+            .where('pagado', '==', false)
+            .get(),
+        ]);
+        const uidByMemberId = new Map(
+          members.docs.map((member) => [member.id, member.get('reclamadoPor')]),
+        );
+
+        for (const division of pendingDivisions.docs) {
+          const memberId = division.get('memberId');
+          const payerId = division.get('pagadoPor');
+          const cents = division.get('cantidadCentimos');
+          const legacyAmount = division.get('cantidad');
+          const hasPositiveAmount = Number.isSafeInteger(cents)
+            ? cents > 0
+            : typeof legacyAmount === 'number' && legacyAmount > 0;
+          const debtorUid = uidByMemberId.get(memberId);
+          if (hasPositiveAmount && memberId !== payerId && groupUids.has(debtorUid)) {
+            debtorUids.add(debtorUid);
+          }
+        }
+      }
 
       for (const usuarioDoc of usuariosSnap.docs) {
         const deviceId = usuarioDoc.id;
@@ -563,65 +726,13 @@ exports.recordatorioDeudas = functions.pubsub
           continue;
         }
 
-        // 2. Buscar todos los groupIds donde esté
-        const memberSnap = await db
-          .collection("groupMembers")
-          .where("deviceId", "==", deviceId)
-          .get();
-
-        const groupIds = memberSnap.docs.map((d) => d.get("groupId"));
-        console.log(`Usuario ${deviceId} pertenece a grupos: ${groupIds.join(", ")}`);
-
-        let tieneDeudaPendiente = false;
-
-        // 3. Para cada grupo, buscar gastos y divisiones
-        for (const gid of groupIds) {
-          // a) Buscar miembros del grupo
-          const membersSnap = await db
-            .collection("groups").doc(gid)
-            .collection("members")
-            .get();
-
-          const phantomSnap = membersSnap.docs.find(
-            (m) => m.get("reclamadoPor") === deviceId
-          );
-
-          if (!phantomSnap) {
+        if (debtorUids.has(deviceId)) {
+          const deliveryRef = db.collection('reminderDeliveries').doc(deviceId);
+          const delivery = await deliveryRef.get();
+          if (delivery.exists && delivery.get('period') === period) {
+            console.log(`Recordatorio ${period} ya enviado a ${deviceId}`);
             continue;
           }
-
-          const phantomId = phantomSnap.id;
-
-          // b) Buscar todos los gastos
-          const gastosSnap = await db
-            .collection("groups").doc(gid)
-            .collection("gastos")
-            .get();
-
-          for (const gastoDoc of gastosSnap.docs) {
-            const gastoData = gastoDoc.data();
-            const pagadoPorId = gastoData.pagadoPor || "";
-
-            // c) Buscar divisiones mías (phantomId)
-            const divisionesSnap = await gastoDoc.ref
-              .collection("divisiones")
-              .where("memberId", "==", phantomId)
-              .where("pagado", "==", false)
-              .where("cantidad", ">", 0)
-              .get();
-
-            if (divisionesSnap.size > 0 && pagadoPorId !== phantomId) {
-              console.log(`Usuario ${deviceId} tiene deuda pendiente en grupo ${gid}`);
-              tieneDeudaPendiente = true;
-              break; // con encontrar una es suficiente
-            }
-          }
-
-          if (tieneDeudaPendiente) break;
-        }
-
-        // 4. Si tiene deudas → enviar notificación
-        if (tieneDeudaPendiente) {
           try {
             await messaging.send({
               token: token,
@@ -629,6 +740,11 @@ exports.recordatorioDeudas = functions.pubsub
                 title: "Recordatorio de deudas",
                 body: "Tienes deudas pendientes en la app.",
               },
+            });
+            await deliveryRef.set({
+              period,
+              userUid: deviceId,
+              sentAt: FieldValue.serverTimestamp(),
             });
             console.log(`Notificación enviada a ${deviceId}`);
           } catch (error) {
