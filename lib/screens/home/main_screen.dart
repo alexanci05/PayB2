@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_speed_dial/flutter_speed_dial.dart'; // Biblioteca para el botón flotante con múltiples opciones
@@ -8,7 +6,7 @@ import 'package:payb2/screens/settings/settings_screen.dart';
 import 'package:payb2/services/auth/identity_mutation_tracker.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:intl/intl.dart';
-import 'package:payb2/services/debts/debt_queries.dart';
+import 'package:payb2/services/debts/wallet_debts.dart';
 
 // Pantalla principal cuando se pertenece a un grupo
 
@@ -21,26 +19,23 @@ class MainScreen extends StatefulWidget {
 
 class _MainScreenState extends State<MainScreen> {
   int _selectedIndex = 0;
-  int _walletRevision = 0;
 
   void _onAccountRestored() {
     setState(() {
       _selectedIndex = 0;
-      _walletRevision++;
     });
   }
 
   void _onItemTapped(int index) {
     setState(() {
       _selectedIndex = index;
-      if (index == 1) _walletRevision++;
     });
   }
 
   Widget _selectedScreen() {
     return switch (_selectedIndex) {
       0 => const GroupsScreen(),
-      1 => WalletScreen(key: ValueKey(_walletRevision)),
+      1 => const WalletScreen(),
       _ => SettingsScreen(onAccountRestored: _onAccountRestored),
     };
   }
@@ -223,82 +218,23 @@ class WalletScreen extends StatefulWidget {
 }
 
 class _WalletScreenState extends State<WalletScreen> {
-  late Future<List<_DebtItem>> _futureDebts;
-  final _debtQueries = DebtQueries();
-  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>?
-  _membershipsSubscription;
-  final Map<String, StreamSubscription<QuerySnapshot<Map<String, dynamic>>>>
-  _divisionSubscriptions = {};
-  Timer? _reloadTimer;
+  late final WalletDebts _wallet;
 
   @override
   void initState() {
     super.initState();
-    _futureDebts = _loadDebts();
-    _watchDebtChanges();
+    _wallet = WalletDebts()..addListener(_onWalletChanged);
+  }
+
+  void _onWalletChanged() {
+    if (mounted) setState(() {});
   }
 
   @override
   void dispose() {
-    _reloadTimer?.cancel();
-    _membershipsSubscription?.cancel();
-    for (final subscription in _divisionSubscriptions.values) {
-      subscription.cancel();
-    }
+    _wallet.removeListener(_onWalletChanged);
+    _wallet.dispose();
     super.dispose();
-  }
-
-  Future<void> _watchDebtChanges() async {
-    final uid = await _loadUid();
-    if (!mounted) return;
-
-    _membershipsSubscription = FirebaseFirestore.instance
-        .collection('groupMembers')
-        .where('deviceId', isEqualTo: uid)
-        .snapshots()
-        .listen((snapshot) {
-          if (!mounted) return;
-          final groupIds = snapshot.docs
-              .map((document) => document.data()['groupId'] as String?)
-              .whereType<String>()
-              .toSet();
-
-          final removedGroups = _divisionSubscriptions.keys
-              .where((groupId) => !groupIds.contains(groupId))
-              .toList();
-          for (final groupId in removedGroups) {
-            _divisionSubscriptions.remove(groupId)?.cancel();
-          }
-
-          for (final groupId in groupIds) {
-            _divisionSubscriptions.putIfAbsent(
-              groupId,
-              () => _debtQueries
-                  .watchGroupDivisions(groupId)
-                  .listen(
-                    (_) => _scheduleReload(),
-                    onError: (_, _) => _scheduleReload(),
-                  ),
-            );
-          }
-          _scheduleReload();
-        }, onError: (_, _) => _scheduleReload());
-  }
-
-  void _scheduleReload() {
-    if (!mounted) return;
-    _reloadTimer?.cancel();
-    _reloadTimer = Timer(const Duration(milliseconds: 150), _reloadDebts);
-  }
-
-  void _reloadDebts() {
-    if (!mounted) return;
-    setState(() => _futureDebts = _loadDebts());
-  }
-
-  Future<String> _loadUid() async {
-    final id = await getUid();
-    return id;
   }
 
   double? _readDebtAmount(Map<String, dynamic> splitData) {
@@ -311,40 +247,13 @@ class _WalletScreenState extends State<WalletScreen> {
     return amount is num ? amount.toDouble() : null;
   }
 
-  Future<List<_DebtItem>> _loadDebts() async {
-    final uid = await _loadUid();
-
-    // 1) Obtenemos todos los groupIds donde este
-    final memberQ = await FirebaseFirestore.instance
-        .collection('groupMembers')
-        .where('deviceId', isEqualTo: uid)
-        .get();
-    final groupIds = memberQ.docs.map((d) => d['groupId'] as String).toList();
-
+  List<_DebtItem> _visibleDebts() {
     final debts = <_DebtItem>[];
-
-    for (final gid in groupIds) {
-      final groupRef = FirebaseFirestore.instance.collection('groups').doc(gid);
-      final results = await Future.wait([
-        groupRef.get(),
-        groupRef.collection('members').get(),
-      ]);
-      final groupDoc = results[0] as DocumentSnapshot<Map<String, dynamic>>;
-      final membersSnap = results[1] as QuerySnapshot<Map<String, dynamic>>;
-      final groupName = groupDoc['name'] as String? ?? 'Grupo';
-      final Map<String, String> memberMap = {
-        for (var m in membersSnap.docs)
-          m.id: (m.data()['name'] as String? ?? '—'),
-      };
-
-      final myMemberIds = membersSnap.docs
-          .where((m) => (m.data()['reclamadoPor'] as String?) == uid)
-          .map((member) => member.id)
-          .toSet();
-      final pendingDivisions = await _debtQueries.loadPendingForMembers(
-        gid,
-        myMemberIds,
-      );
+    for (final group in _wallet.groups) {
+      final gid = group.id;
+      final groupName = group.name;
+      final memberMap = group.memberNames;
+      final pendingDivisions = group.pending;
 
       for (final splitDoc in pendingDivisions) {
         final splitData = splitDoc.data();
@@ -399,9 +308,6 @@ class _WalletScreenState extends State<WalletScreen> {
               'pagoRegistradoPor': debt.myPhantomId,
             }),
       );
-
-      if (!mounted) return;
-      _reloadDebts();
     } catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -414,58 +320,73 @@ class _WalletScreenState extends State<WalletScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return FutureBuilder<List<_DebtItem>>(
-      future: _futureDebts,
-      builder: (context, snap) {
-        if (snap.connectionState == ConnectionState.waiting) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        if (snap.hasError) {
-          return Center(child: Text('Error: ${snap.error}'));
-        }
-        final debts = snap.data!;
-        if (debts.isEmpty) {
-          return const Center(child: Text('No tienes deudas pendientes.'));
-        }
-
-        return ListView.builder(
-          padding: const EdgeInsets.all(16),
-          itemCount: debts.length,
-          itemBuilder: (context, i) {
-            final d = debts[i];
-            return Card(
-              margin: const EdgeInsets.symmetric(vertical: 6),
-              child: ListTile(
-                title: Text(d.gastoName),
-                subtitle: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      '${d.groupName}\nDebes €${d.amount.toStringAsFixed(2)} a ${d.pagadoPorName}',
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      d.fecha,
-                      style: const TextStyle(fontSize: 12, color: Colors.grey),
-                    ),
-                  ],
-                ),
-                isThreeLine: true,
-                trailing: Row(
-                  mainAxisSize:
-                      MainAxisSize.min, // Para que no ocupe todo el ancho
-                  children: [
-                    ElevatedButton(
-                      onPressed: () => _markDebtPaid(d),
-                      child: const Text('Marcar pagado'),
-                    ),
-                  ],
-                ),
+    if (_wallet.isLoading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    final debts = _visibleDebts();
+    final error = _wallet.error;
+    return Column(
+      children: [
+        if (error != null)
+          Material(
+            color: Theme.of(context).colorScheme.errorContainer,
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Text(
+                'No se pudieron actualizar las deudas: $error',
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
               ),
-            );
-          },
-        );
-      },
+            ),
+          ),
+        Expanded(
+          child: debts.isEmpty
+              ? Center(
+                  child: Text(
+                    error == null
+                        ? 'No tienes deudas pendientes.'
+                        : 'No se pudieron cargar las deudas pendientes.',
+                  ),
+                )
+              : ListView.builder(
+                  padding: const EdgeInsets.all(16),
+                  itemCount: debts.length,
+                  itemBuilder: (context, i) {
+                    final d = debts[i];
+                    return Card(
+                      key: ValueKey(
+                        '${d.groupId}/${d.gastoId}/${d.splitDocId}',
+                      ),
+                      margin: const EdgeInsets.symmetric(vertical: 6),
+                      child: ListTile(
+                        title: Text(d.gastoName),
+                        subtitle: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '${d.groupName}\nDebes €${d.amount.toStringAsFixed(2)} a ${d.pagadoPorName}',
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              d.fecha,
+                              style: const TextStyle(
+                                fontSize: 12,
+                                color: Colors.grey,
+                              ),
+                            ),
+                          ],
+                        ),
+                        isThreeLine: true,
+                        trailing: ElevatedButton(
+                          onPressed: () => _markDebtPaid(d),
+                          child: const Text('Marcar pagado'),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+        ),
+      ],
     );
   }
 }
