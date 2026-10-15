@@ -352,6 +352,78 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     assert.ok(created.groupId);
   });
 
+  test('merge cancellation is retryable and its tombstone remains source-owned', async () => {
+    const ticket = await prepareAccountMerge(db, 'source-uid');
+    await activateAccountMerge(db, 'source-uid', ticket);
+    const input = { mergeTicket: ticket };
+    const auth = { auth: { uid: 'source-uid', token: { firebase: { sign_in_provider: 'anonymous' } } } };
+
+    assert.deepEqual(await entryPoints.cancelarFusionCuenta.run(input, auth), { canceled: true });
+    assert.deepEqual(await entryPoints.cancelarFusionCuenta.run(input, auth), { canceled: true });
+
+    const ticketId = createHash('sha256').update(ticket).digest('hex');
+    const canceled = await db.collection('accountMergeTickets').doc(ticketId).get();
+    assert.equal(canceled.get('sourceUid'), 'source-uid');
+    assert.equal(canceled.get('status'), 'canceled');
+    assert.equal((await db.collection('accountMerges').doc('source-uid').get()).exists, false);
+    await assert.rejects(cancelAccountMerge(db, 'foreign-uid', ticket), AccountMergeConflictError);
+    await assert.rejects(activateAccountMerge(db, 'source-uid', ticket), AccountMergeConflictError);
+    await assert.rejects(completeAccountMerge(db, ticket, 'target-uid'), AccountMergeConflictError);
+  });
+
+  test('canceling a different prepared ticket never releases the original merge lock', async () => {
+    const original = await prepareAccountMerge(db, 'source-uid');
+    await activateAccountMerge(db, 'source-uid', original);
+    const mergeRef = db.collection('accountMerges').doc('source-uid');
+    const originalLock = (await mergeRef.get()).data();
+    const other = await prepareAccountMerge(db, 'source-uid');
+
+    await assert.rejects(activateAccountMerge(db, 'source-uid', other), AccountMergeConflictError);
+    await assert.rejects(cancelAccountMerge(db, 'foreign-uid', other), AccountMergeConflictError);
+    await cancelAccountMerge(db, 'source-uid', other);
+    await cancelAccountMerge(db, 'source-uid', other);
+
+    assert.deepEqual((await mergeRef.get()).data(), originalLock);
+    await assert.rejects(
+      entryPoints.crearGrupo.run(
+        { requestId: db.collection('groups').doc().id, nombre: 'Bloqueado', miembros: ['Ana'] },
+        { auth: { uid: 'source-uid' } },
+      ),
+      { code: 'failed-precondition' },
+    );
+    await completeAccountMerge(db, original, 'target-uid');
+    await assert.rejects(cancelAccountMerge(db, 'source-uid', original), AccountMergeConflictError);
+    await assert.rejects(completeAccountMerge(db, original, 'other-target-uid'), AccountMergeConflictError);
+  });
+
+  test('a missing merge ticket is cancelable only without an existing merge lock', async () => {
+    const ticket = await prepareAccountMerge(db, 'source-uid');
+    const ticketId = createHash('sha256').update(ticket).digest('hex');
+    await db.collection('accountMergeTickets').doc(ticketId).delete();
+
+    await cancelAccountMerge(db, 'source-uid', ticket);
+    await cancelAccountMerge(db, 'source-uid', ticket);
+    const original = await prepareAccountMerge(db, 'source-uid');
+    await activateAccountMerge(db, 'source-uid', original);
+    const mergeRef = db.collection('accountMerges').doc('source-uid');
+    const originalLock = (await mergeRef.get()).data();
+
+    await assert.rejects(cancelAccountMerge(db, 'source-uid', ticket), AccountMergeConflictError);
+    assert.deepEqual((await mergeRef.get()).data(), originalLock);
+  });
+
+  test('merge cancellation rejects tickets already claimed by a target', async () => {
+    const ticket = await prepareAccountMerge(db, 'source-uid');
+    await activateAccountMerge(db, 'source-uid', ticket);
+    const ticketId = createHash('sha256').update(ticket).digest('hex');
+    const ticketRef = db.collection('accountMergeTickets').doc(ticketId);
+    await ticketRef.update({ targetUid: 'target-uid', status: 'running' });
+
+    await assert.rejects(cancelAccountMerge(db, 'source-uid', ticket), AccountMergeConflictError);
+    assert.equal((await ticketRef.get()).get('status'), 'running');
+    assert.equal((await db.collection('accountMerges').doc('source-uid').get()).exists, true);
+  });
+
   test('account merge keeps both identities when accounts share a group', async () => {
     const group = db.collection('groups').doc('shared-group');
     await Promise.all([

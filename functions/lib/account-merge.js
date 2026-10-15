@@ -79,11 +79,26 @@ async function cancelAccountMerge(db, sourceUid, ticket) {
   const mergeRef = db.collection('accountMerges').doc(sourceUid);
   await db.runTransaction(async (transaction) => {
     const [ticketSnapshot, mergeSnapshot] = await transaction.getAll(ticketRef, mergeRef);
-    if (!ticketSnapshot.exists || ticketSnapshot.get('sourceUid') !== sourceUid ||
-        !['prepared', 'active'].includes(ticketSnapshot.get('status'))) {
+    // Legacy cancellations deleted tickets; without ownership evidence, never touch a lock.
+    if (!ticketSnapshot.exists) {
+      if (mergeSnapshot.exists) {
+        throw new AccountMergeConflictError('La fusión ya no se puede cancelar');
+      }
+      return;
+    }
+    if (ticketSnapshot.get('sourceUid') !== sourceUid || ticketSnapshot.get('targetUid')) {
       throw new AccountMergeConflictError('La fusión ya no se puede cancelar');
     }
-    transaction.delete(ticketRef);
+    if (ticketSnapshot.get('status') === 'canceled') return;
+    if (!['prepared', 'active'].includes(ticketSnapshot.get('status')) ||
+        (mergeSnapshot.exists && mergeSnapshot.get('ticketId') === ticketRef.id &&
+          (mergeSnapshot.get('status') !== 'prepared' || mergeSnapshot.get('targetUid')))) {
+      throw new AccountMergeConflictError('La fusión ya no se puede cancelar');
+    }
+    transaction.update(ticketRef, {
+      status: 'canceled',
+      updatedAt: FieldValue.serverTimestamp(),
+    });
     if (mergeSnapshot.exists && mergeSnapshot.get('status') === 'prepared' &&
         mergeSnapshot.get('ticketId') === ticketRef.id) {
       transaction.delete(mergeRef);

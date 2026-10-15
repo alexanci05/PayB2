@@ -30,19 +30,17 @@ class AccountAuthService {
   Future<void>? _mergeRecovery;
 
   Future<User> signIn(AccountProvider provider) async {
-    final sourceUser = _auth.currentUser;
-    if (sourceUser == null) {
-      throw const AccountAuthFailure(
-        'No hay una sesión activa. Cierra y vuelve a abrir la aplicación.',
-      );
-    }
-    if (!sourceUser.isAnonymous) {
-      await resumePendingMerge();
-      return _auth.currentUser!;
-    }
-
     try {
       return await IdentityMutationTracker.shared.runExclusively(() async {
+        await _resumePendingMerge();
+        final sourceUser = _auth.currentUser;
+        if (sourceUser == null) {
+          throw const AccountAuthFailure(
+            'No hay una sesión activa. Cierra y vuelve a abrir la aplicación.',
+          );
+        }
+        if (!sourceUser.isAnonymous) return sourceUser;
+
         final credential = await _linkOrGetExistingCredential(
           sourceUser,
           provider,
