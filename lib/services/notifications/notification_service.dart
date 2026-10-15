@@ -8,15 +8,33 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../controladores/registrar_usuario.dart';
 
 class NotificationService {
-  NotificationService._();
+  NotificationService._({
+    Future<void> Function(bool)? setAutoInitEnabled,
+    Future<void> Function()? removeRegistration,
+  }) : _setAutoInitEnabled =
+           setAutoInitEnabled ?? FirebaseMessaging.instance.setAutoInitEnabled,
+       _removeRegistration =
+           removeRegistration ?? removeCurrentDeviceMessagingToken;
+
+  @visibleForTesting
+  factory NotificationService.forTesting({
+    required Future<void> Function(bool) setAutoInitEnabled,
+    required Future<void> Function() removeRegistration,
+  }) => NotificationService._(
+    setAutoInitEnabled: setAutoInitEnabled,
+    removeRegistration: removeRegistration,
+  );
 
   static final NotificationService shared = NotificationService._();
 
   static const _enabledPreferenceKey = 'notifications.enabled';
   static const _permissionRequestedPreferenceKey =
       'notifications.permissionRequested';
+  static const _removalPendingPreferenceKey = 'notifications.removalPending';
 
   final ValueNotifier<bool> _enabled = ValueNotifier<bool>(false);
+  final Future<void> Function(bool) _setAutoInitEnabled;
+  final Future<void> Function() _removeRegistration;
   final FlutterLocalNotificationsPlugin _localNotifications =
       FlutterLocalNotificationsPlugin();
   final AndroidNotificationChannel _androidChannel =
@@ -72,10 +90,14 @@ class NotificationService {
     if (!preferences.containsKey(_enabledPreferenceKey)) {
       await preferences.setBool(_enabledPreferenceKey, storedEnabled);
     }
-    await _applyRuntimeStatus(storedEnabled && _isAuthorized(settings));
+    final desiredEnabled =
+        preferences.getBool(_enabledPreferenceKey) ?? storedEnabled;
+    await _applyRuntimeStatus(desiredEnabled && _isAuthorized(settings));
 
     if (_enabled.value) {
       await _registerCurrentToken();
+    } else {
+      _scheduleRegistrationRemoval();
     }
   }
 
@@ -86,16 +108,17 @@ class NotificationService {
   }
 
   Future<bool> _setEnabled(bool enabled) async {
-    await initialize();
     final preferences = await SharedPreferences.getInstance();
 
     if (!enabled) {
+      await preferences.setBool(_removalPendingPreferenceKey, true);
       await preferences.setBool(_enabledPreferenceKey, false);
       await _applyRuntimeStatus(false);
-      await _enqueueTokenOperation(removeCurrentDeviceMessagingToken);
+      _scheduleRegistrationRemoval();
       return true;
     }
 
+    await initialize();
     await preferences.setBool(_enabledPreferenceKey, true);
 
     var settings = await FirebaseMessaging.instance.getNotificationSettings();
@@ -111,7 +134,13 @@ class NotificationService {
     return true;
   }
 
-  Future<void> refreshStatus() async {
+  Future<void> refreshStatus() {
+    final result = _stateChanges.then((_) => _refreshStatus());
+    _stateChanges = result.then<void>((_) {}, onError: (_, _) {});
+    return result;
+  }
+
+  Future<void> _refreshStatus() async {
     await initialize();
 
     final preferences = await SharedPreferences.getInstance();
@@ -120,6 +149,8 @@ class NotificationService {
     await _applyRuntimeStatus(storedEnabled && _isAuthorized(settings));
     if (_enabled.value) {
       await _registerCurrentToken();
+    } else {
+      _scheduleRegistrationRemoval();
     }
   }
 
@@ -174,7 +205,14 @@ class NotificationService {
         return;
       }
 
-      await registerUserForNotifications();
+      await _setAutoInitEnabled(true);
+      final token = await registerUserForNotifications();
+      if (token != null &&
+          _enabled.value &&
+          registrationGeneration == _registrationGeneration) {
+        final preferences = await SharedPreferences.getInstance();
+        await preferences.setBool(_removalPendingPreferenceKey, false);
+      }
     });
 
     if (!_enabled.value || registrationGeneration != _registrationGeneration) {
@@ -202,6 +240,27 @@ class NotificationService {
   Future<void> _stopTokenRefresh() async {
     await _tokenRefresh?.cancel();
     _tokenRefresh = null;
+  }
+
+  void _scheduleRegistrationRemoval() {
+    final generation = _registrationGeneration;
+    unawaited(
+      _enqueueTokenOperation(() async {
+        if (_enabled.value || generation != _registrationGeneration) return;
+        await _setAutoInitEnabled(false);
+        final preferences = await SharedPreferences.getInstance();
+        final pending =
+            preferences.getBool(_removalPendingPreferenceKey) ?? true;
+        if (!pending) return;
+
+        await _removeRegistration();
+        await preferences.setBool(_removalPendingPreferenceKey, false);
+      }).catchError((Object error, StackTrace stackTrace) {
+        debugPrint(
+          'La baja de notificaciones sigue pendiente: $error\n$stackTrace',
+        );
+      }),
+    );
   }
 
   Future<void> _enqueueTokenOperation(Future<void> Function() operation) {

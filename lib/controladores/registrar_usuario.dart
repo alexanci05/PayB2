@@ -74,16 +74,18 @@ Future<void> saveMessagingTokenForCurrentUser(String token) async {
 Future<void> removeCurrentDeviceMessagingToken() async {
   await IdentityMutationTracker.shared.track(() async {
     final user = FirebaseAuth.instance.currentUser;
-    String? token;
-
-    try {
-      token = await FirebaseMessaging.instance.getToken();
-      if (user != null && token != null) {
-        await _removeMessagingTokenIfMatches(user.uid, token);
-      }
-    } finally {
-      await FirebaseMessaging.instance.deleteToken();
+    if (user == null) {
+      throw StateError('No hay una sesión para dar de baja el dispositivo');
     }
+    final installationId = await _getInstallationId();
+    // Firestore queues offline deletes; the timeout releases the identity lock.
+    await FirebaseFirestore.instance
+        .collection('usuarios')
+        .doc(user.uid)
+        .collection('devices')
+        .doc(installationId)
+        .delete()
+        .timeout(const Duration(seconds: 10));
   });
 }
 
@@ -97,21 +99,6 @@ Future<void> _saveMessagingToken(String uid, String token) async {
       'tokenUpdatedAt': FieldValue.serverTimestamp(),
     });
     if (user.data()?['fcmToken'] == token) {
-      transaction.update(userDoc, {'fcmToken': FieldValue.delete()});
-    }
-  });
-}
-
-Future<void> _removeMessagingTokenIfMatches(String uid, String token) async {
-  final userDoc = FirebaseFirestore.instance.collection('usuarios').doc(uid);
-  final installationId = await _getInstallationId();
-  final deviceDoc = userDoc.collection('devices').doc(installationId);
-
-  await FirebaseFirestore.instance.runTransaction((transaction) async {
-    final snapshot = await transaction.get(userDoc);
-    final device = await transaction.get(deviceDoc);
-    if (device.data()?['fcmToken'] == token) transaction.delete(deviceDoc);
-    if (snapshot.data()?['fcmToken'] == token) {
       transaction.update(userDoc, {'fcmToken': FieldValue.delete()});
     }
   });
