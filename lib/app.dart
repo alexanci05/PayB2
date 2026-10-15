@@ -1,4 +1,8 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:payb2/services/auth/account_auth_service.dart';
+import 'package:payb2/services/notifications/notification_service.dart';
 import 'screens/home/home_screen.dart';
 import 'screens/home/main_screen.dart';
 import 'screens/crear_grupo/crear_grupo_screen.dart';
@@ -14,13 +18,46 @@ class MyApp extends StatefulWidget {
   State<MyApp> createState() => _MyAppState();
 }
 
-class _MyAppState extends State<MyApp> {
+class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
   late Future<Widget> _initialScreenFuture;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _initialScreenFuture = _getInitialScreen();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) return;
+
+    unawaited(_restoreExternalState());
+  }
+
+  Future<void> _restoreExternalState() async {
+    try {
+      await AccountAuthService.shared.resumePendingMerge();
+    } catch (error, stackTrace) {
+      debugPrint(
+        'No se pudo reanudar la fusión de cuenta: $error\n$stackTrace',
+      );
+    }
+
+    try {
+      await NotificationService.shared.refreshRegistration();
+    } catch (error, stackTrace) {
+      debugPrint(
+        'No se pudo actualizar el registro de notificaciones: '
+        '$error\n$stackTrace',
+      );
+    }
   }
 
   Future<Widget> _getInitialScreen() async {

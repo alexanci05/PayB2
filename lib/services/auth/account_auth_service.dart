@@ -27,6 +27,7 @@ class AccountAuthService {
   final FirebaseAuth _auth;
   final FirebaseFunctions _functions;
   Future<void>? _googleInitialization;
+  Future<void>? _mergeRecovery;
 
   Future<User> signIn(AccountProvider provider) async {
     final sourceUser = _auth.currentUser;
@@ -36,7 +37,8 @@ class AccountAuthService {
       );
     }
     if (!sourceUser.isAnonymous) {
-      throw const AccountAuthFailure('Ya has iniciado sesión.');
+      await resumePendingMerge();
+      return _auth.currentUser!;
     }
 
     try {
@@ -100,6 +102,23 @@ class AccountAuthService {
   }
 
   Future<void> resumePendingMerge() async {
+    final pendingRecovery = _mergeRecovery;
+    if (pendingRecovery != null) return pendingRecovery;
+
+    final recovery = IdentityMutationTracker.shared.runExclusively(
+      _resumePendingMerge,
+    );
+    _mergeRecovery = recovery;
+    try {
+      await recovery;
+    } finally {
+      if (identical(_mergeRecovery, recovery)) {
+        _mergeRecovery = null;
+      }
+    }
+  }
+
+  Future<void> _resumePendingMerge() async {
     final preferences = await SharedPreferences.getInstance();
     final ticket = preferences.getString(_pendingMergeTicketKey);
     if (ticket == null) return;

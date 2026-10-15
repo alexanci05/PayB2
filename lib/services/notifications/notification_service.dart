@@ -36,8 +36,20 @@ class NotificationService {
   ValueListenable<bool> get enabled => _enabled;
   bool get isEnabled => _enabled.value;
 
-  Future<void> initialize() {
-    return _initialization ??= _initialize();
+  Future<void> initialize() async {
+    final pendingInitialization = _initialization;
+    if (pendingInitialization != null) return pendingInitialization;
+
+    final initialization = _initialize();
+    _initialization = initialization;
+    try {
+      await initialization;
+    } catch (_) {
+      if (identical(_initialization, initialization)) {
+        _initialization = null;
+      }
+      rethrow;
+    }
   }
 
   Future<void> _initialize() async {
@@ -57,7 +69,10 @@ class NotificationService {
 
     final storedEnabled =
         preferences.getBool(_enabledPreferenceKey) ?? _isAuthorized(settings);
-    await _applyStatus(storedEnabled && _isAuthorized(settings), preferences);
+    if (!preferences.containsKey(_enabledPreferenceKey)) {
+      await preferences.setBool(_enabledPreferenceKey, storedEnabled);
+    }
+    await _applyRuntimeStatus(storedEnabled && _isAuthorized(settings));
 
     if (_enabled.value) {
       await _registerCurrentToken();
@@ -76,10 +91,12 @@ class NotificationService {
 
     if (!enabled) {
       await preferences.setBool(_enabledPreferenceKey, false);
-      await _applyStatus(false, preferences);
+      await _applyRuntimeStatus(false);
       await _enqueueTokenOperation(removeCurrentDeviceMessagingToken);
       return true;
     }
+
+    await preferences.setBool(_enabledPreferenceKey, true);
 
     var settings = await FirebaseMessaging.instance.getNotificationSettings();
     if (!_isAuthorized(settings)) {
@@ -87,7 +104,7 @@ class NotificationService {
     }
 
     final authorized = _isAuthorized(settings);
-    await _applyStatus(authorized, preferences);
+    await _applyRuntimeStatus(authorized);
     if (!authorized) return false;
 
     await _registerCurrentToken();
@@ -100,14 +117,14 @@ class NotificationService {
     final preferences = await SharedPreferences.getInstance();
     final settings = await FirebaseMessaging.instance.getNotificationSettings();
     final storedEnabled = preferences.getBool(_enabledPreferenceKey) ?? false;
-    await _applyStatus(storedEnabled && _isAuthorized(settings), preferences);
+    await _applyRuntimeStatus(storedEnabled && _isAuthorized(settings));
+    if (_enabled.value) {
+      await _registerCurrentToken();
+    }
   }
 
   Future<void> refreshRegistration() async {
     await refreshStatus();
-    if (_enabled.value) {
-      await _registerCurrentToken();
-    }
   }
 
   Future<void> _initializeLocalNotifications() async {
@@ -140,8 +157,7 @@ class NotificationService {
     return settings;
   }
 
-  Future<void> _applyStatus(bool enabled, SharedPreferences preferences) async {
-    await preferences.setBool(_enabledPreferenceKey, enabled);
+  Future<void> _applyRuntimeStatus(bool enabled) async {
     _enabled.value = enabled;
 
     if (!enabled) {

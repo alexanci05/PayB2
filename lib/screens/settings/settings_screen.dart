@@ -17,28 +17,13 @@ class SettingsScreen extends StatefulWidget {
   State<SettingsScreen> createState() => _SettingsScreenState();
 }
 
-class _SettingsScreenState extends State<SettingsScreen>
-    with WidgetsBindingObserver {
+class _SettingsScreenState extends State<SettingsScreen> {
   bool _changingNotifications = false;
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
     unawaited(NotificationService.shared.refreshStatus());
-  }
-
-  @override
-  void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    super.dispose();
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
-      unawaited(NotificationService.shared.refreshStatus());
-    }
   }
 
   Future<void> _openAccountAccess() async {
