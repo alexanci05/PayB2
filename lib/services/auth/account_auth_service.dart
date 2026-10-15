@@ -3,6 +3,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:payb2/services/auth/identity_mutation_tracker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:payb2/services/network/connection_status.dart';
 
 enum AccountProvider { google, apple }
 
@@ -124,9 +125,9 @@ class AccountAuthService {
     final user = _auth.currentUser;
     if (user == null) return;
     if (user.isAnonymous) {
-      await _functions.httpsCallable('cancelarFusionCuenta').call<void>({
-        'mergeTicket': ticket,
-      });
+      await _functions.httpsCallable('cancelarFusionCuenta').callObserved<void>(
+        {'mergeTicket': ticket},
+      );
     } else {
       await _completeMerge(ticket);
     }
@@ -169,7 +170,7 @@ class AccountAuthService {
   Future<String> _prepareMerge() async {
     final result = await _functions
         .httpsCallable('prepararFusionCuenta')
-        .call<Map<String, dynamic>>();
+        .callObserved<Map<String, dynamic>>();
     final ticket = result.data['mergeTicket'];
     if (ticket is! String || ticket.isEmpty) {
       throw const AccountAuthFailure(
@@ -180,19 +181,19 @@ class AccountAuthService {
   }
 
   Future<void> _completeMerge(String ticket) async {
-    await _functions.httpsCallable('fusionarCuentaAnonima').call<void>({
+    await _functions.httpsCallable('fusionarCuentaAnonima').callObserved<void>({
       'mergeTicket': ticket,
     });
   }
 
   Future<void> _activateMerge(String ticket) async {
-    await _functions.httpsCallable('bloquearFusionCuenta').call<void>({
+    await _functions.httpsCallable('bloquearFusionCuenta').callObserved<void>({
       'mergeTicket': ticket,
     });
   }
 
   Future<void> _cancelMerge(String ticket) async {
-    await _functions.httpsCallable('cancelarFusionCuenta').call<void>({
+    await _functions.httpsCallable('cancelarFusionCuenta').callObserved<void>({
       'mergeTicket': ticket,
     });
   }

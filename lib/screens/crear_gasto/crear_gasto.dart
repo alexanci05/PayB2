@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import 'package:payb2/domain/expense_split.dart';
 import 'package:payb2/services/auth/identity_mutation_tracker.dart';
+import 'package:payb2/services/network/connection_status.dart';
 
 class CrearGastoScreen extends StatefulWidget {
   final String groupId;
@@ -185,10 +186,9 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
     setState(() => _isSubmitting = true);
     try {
       await IdentityMutationTracker.shared.track(
-        () => FirebaseFunctions.instance.httpsCallable('crearGasto').call({
-          ...payload,
-          'requestId': _requestId,
-        }),
+        () => FirebaseFunctions.instance
+            .httpsCallable('crearGasto')
+            .callObserved({...payload, 'requestId': _requestId}),
       );
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(

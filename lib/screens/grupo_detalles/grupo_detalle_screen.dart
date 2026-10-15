@@ -11,6 +11,7 @@ import 'package:payb2/services/auth/identity_mutation_tracker.dart';
 import 'package:payb2/services/debts/debt_queries.dart';
 import 'package:payb2/domain/group_balances.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:payb2/services/network/connection_status.dart';
 
 class GrupoDetalleScreen extends StatefulWidget {
   final String groupId;
@@ -139,10 +140,9 @@ class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
 
     try {
       final result = await IdentityMutationTracker.shared.track(
-        () => FirebaseFunctions.instance.httpsCallable('reclamarMiembro').call({
-          'groupId': widget.groupId,
-          'memberId': chosen,
-        }),
+        () => FirebaseFunctions.instance
+            .httpsCallable('reclamarMiembro')
+            .callObserved({'groupId': widget.groupId, 'memberId': chosen}),
       );
       if (!mounted) return;
       setState(() => _myMemberIds = [result.data['memberId'] as String]);

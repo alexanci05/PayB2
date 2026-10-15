@@ -5,6 +5,7 @@ import 'package:cloud_functions/cloud_functions.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:payb2/screens/home/main_screen.dart';
 import 'package:payb2/services/auth/identity_mutation_tracker.dart';
+import 'package:payb2/services/network/connection_status.dart';
 
 class CrearGrupoScreen extends StatefulWidget {
   const CrearGrupoScreen({super.key});
@@ -86,7 +87,7 @@ class CrearGrupoScreenState extends State<CrearGrupoScreen> {
     try {
       final callable = FirebaseFunctions.instance.httpsCallable('crearGrupo');
       await IdentityMutationTracker.shared.track(
-        () => callable.call<Map<String, dynamic>>({
+        () => callable.callObserved<Map<String, dynamic>>({
           ...payload,
           'requestId': _requestId,
         }),
