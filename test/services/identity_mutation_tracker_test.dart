@@ -4,6 +4,32 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:payb2/services/auth/identity_mutation_tracker.dart';
 
 void main() {
+  test('a mutation waits for every exclusive operation ahead of it', () async {
+    final tracker = IdentityMutationTracker.shared;
+    final releaseFirst = Completer<void>();
+    final releaseSecond = Completer<void>();
+    final first = tracker.runExclusively(() => releaseFirst.future);
+    await Future<void>.delayed(Duration.zero);
+
+    var secondStarted = false;
+    final second = tracker.runExclusively(() async {
+      secondStarted = true;
+      await releaseSecond.future;
+    });
+    var mutationStarted = false;
+    final mutation = tracker.track(() async => mutationStarted = true);
+
+    releaseFirst.complete();
+    await Future<void>.delayed(Duration.zero);
+    final ranDuringSecond = mutationStarted;
+    releaseSecond.complete();
+    await Future.wait([first, second, mutation]);
+
+    expect(secondStarted, isTrue);
+    expect(ranDuringSecond, isFalse);
+    expect(mutationStarted, isTrue);
+  });
+
   test('restoration waits for pending membership operations', () async {
     final operation = Completer<void>();
     final tracked = IdentityMutationTracker.shared.track(

@@ -10,8 +10,9 @@ class IdentityMutationTracker {
   Future<void>? _exclusiveOperation;
 
   Future<T> track<T>(Future<T> Function() operation) async {
-    final exclusiveOperation = _exclusiveOperation;
-    if (exclusiveOperation != null) await exclusiveOperation;
+    while (_exclusiveOperation != null) {
+      await _exclusiveOperation;
+    }
     _pendingOperations++;
     _idleCompleter ??= Completer<void>();
     try {
