@@ -388,9 +388,9 @@ exports.eliminarGasto = functions.https.onCall(async (data, context) => {
     throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesión');
   }
 
-  const { groupId, gastoId, eliminarSerie } = data || {};
+  const { groupId, gastoId } = data || {};
   const validId = (id) => typeof id === 'string' && id.length > 0 && id.length <= 1500 && !id.includes('/');
-  if (!validId(groupId) || !validId(gastoId) || typeof eliminarSerie !== 'boolean') {
+  if (!validId(groupId) || !validId(gastoId)) {
     throw new functions.https.HttpsError('invalid-argument', 'Los datos del borrado no son válidos');
   }
 
@@ -411,7 +411,7 @@ exports.eliminarGasto = functions.https.onCall(async (data, context) => {
     }
 
     const scheduleId = expenseSnap.get('scheduleId');
-    if (eliminarSerie && scheduleId != null) {
+    if (scheduleId != null) {
       if (!validId(scheduleId)) {
         throw new functions.https.HttpsError('failed-precondition', 'La programación asociada no es válida');
       }
@@ -428,29 +428,45 @@ exports.eliminarGastoProgramado = functions.https.onCall(async (data, context) =
     throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesión');
   }
 
-  const { groupId, scheduleId } = data || {};
+  const { groupId, scheduleId, scheduledForMillis } = data || {};
   const validId = (id) => typeof id === 'string' && id.length > 0 && id.length <= 1500 && !id.includes('/');
-  if (!validId(groupId) || !validId(scheduleId)) {
+  if (!validId(groupId) || !validId(scheduleId) ||
+      !Number.isSafeInteger(scheduledForMillis) ||
+      scheduledForMillis < -62135596800000 || scheduledForMillis > 253402300799999) {
     throw new functions.https.HttpsError('invalid-argument', 'La programación no es válida');
   }
 
   const uid = context.auth.uid;
   const groupRef = db.collection('groups').doc(groupId);
   const scheduleRef = groupRef.collection('gastosProgramados').doc(scheduleId);
+  const occurrenceRef = groupRef.collection('gastos').doc(
+    scheduledOccurrenceId(scheduleId, Timestamp.fromMillis(scheduledForMillis)),
+  );
   return db.runTransaction(async (transaction) => {
     await assertAccountCanMutate(transaction, uid);
-    const [groupSnap, scheduleSnap] = await transaction.getAll(groupRef, scheduleRef);
-    if (!scheduleSnap.exists) return { deleted: false };
+    const [groupSnap, scheduleSnap, occurrenceSnap] = await transaction.getAll(
+      groupRef, scheduleRef, occurrenceRef,
+    );
+    if (!scheduleSnap.exists && !occurrenceSnap.exists) {
+      const membership = await transaction.get(db.collection('groupMembers').doc(`${groupId}_${uid}`));
+      if (!groupSnap.exists ||
+          (groupSnap.get('ownerDeviceId') !== uid && !membership.exists)) {
+        throw new functions.https.HttpsError('permission-denied', 'No perteneces a este grupo');
+      }
+      return { deleted: false, occurrenceGenerated: false };
+    }
+    const creatorUid = scheduleSnap.exists
+      ? scheduleSnap.get('createdByUid') : occurrenceSnap.get('createdByUid');
     if (!groupSnap.exists ||
-        (groupSnap.get('ownerDeviceId') !== uid && scheduleSnap.get('createdByUid') !== uid)) {
+        (groupSnap.get('ownerDeviceId') !== uid && creatorUid !== uid)) {
       throw new functions.https.HttpsError(
         'permission-denied',
         'No puedes eliminar este gasto programado',
       );
     }
 
-    transaction.delete(scheduleRef);
-    return { deleted: true };
+    if (scheduleSnap.exists) transaction.delete(scheduleRef);
+    return { deleted: scheduleSnap.exists, occurrenceGenerated: occurrenceSnap.exists };
   });
 });
 

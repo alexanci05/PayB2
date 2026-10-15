@@ -314,39 +314,34 @@ class _GastosViewState extends State<GastosView> {
   }
 
   Future<void> _confirmAndDelete(String gastoId, String? scheduleId) async {
-    final choice = await showDialog<_DeleteChoice>(
+    final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Eliminar gasto'),
-        content: const Text(
-          'El gasto y sus divisiones se eliminarán definitivamente.',
+        content: Text(
+          scheduleId == null
+              ? 'El gasto y sus divisiones se eliminarán definitivamente.'
+              : 'El gasto y sus divisiones se eliminarán. También dejarán de generarse gastos futuros de esta periodicidad. Los otros gastos ya generados se conservan.',
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
             child: const Text('Cancelar'),
           ),
-          if (scheduleId != null)
-            TextButton(
-              onPressed: () => Navigator.pop(context, _DeleteChoice.series),
-              child: const Text('Eliminar también futuras'),
-            ),
           FilledButton(
-            onPressed: () => Navigator.pop(context, _DeleteChoice.occurrence),
-            child: const Text('Eliminar este gasto'),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Eliminar gasto'),
           ),
         ],
       ),
     );
 
-    if (choice == null) return;
+    if (confirmed != true || !mounted) return;
     try {
       await IdentityMutationTracker.shared.track(
-        () => FirebaseFunctions.instance.httpsCallable('eliminarGasto').call({
-          'groupId': widget.groupId,
-          'gastoId': gastoId,
-          'eliminarSerie': choice == _DeleteChoice.series,
-        }),
+        () => FirebaseFunctions.instance
+            .httpsCallable('eliminarGasto')
+            .callObserved({'groupId': widget.groupId, 'gastoId': gastoId}),
       );
       if (!mounted) return;
       widget.onChanged();
@@ -358,13 +353,19 @@ class _GastosViewState extends State<GastosView> {
     }
   }
 
-  Future<void> _confirmAndDeleteSchedule(String scheduleId) async {
+  Future<void> _confirmAndDeleteSchedule(
+    String scheduleId,
+    Timestamp scheduledFor,
+    bool recurring,
+  ) async {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Cancelar gasto programado'),
-        content: const Text(
-          'El gasto no llegará a generarse en la fecha indicada.',
+        content: Text(
+          recurring
+              ? 'Se cancelará la periodicidad. Los gastos ya generados y sus deudas se conservan.'
+              : 'Se cancelará este gasto si todavía no se ha generado.',
         ),
         actions: [
           TextButton(
@@ -386,13 +387,29 @@ class _GastosViewState extends State<GastosView> {
 
     setState(() => _deletingSchedules.add(scheduleId));
     try {
-      await IdentityMutationTracker.shared.track(
+      final result = await IdentityMutationTracker.shared.track(
         () => FirebaseFunctions.instance
             .httpsCallable('eliminarGastoProgramado')
-            .call({'groupId': widget.groupId, 'scheduleId': scheduleId}),
+            .callObserved<Map<String, dynamic>>({
+              'groupId': widget.groupId,
+              'scheduleId': scheduleId,
+              'scheduledForMillis': scheduledFor.millisecondsSinceEpoch,
+            }),
       );
       if (!mounted) return;
       widget.onChanged();
+      final generated = result.data['occurrenceGenerated'] == true;
+      final deleted = result.data['deleted'] == true;
+      final message = generated
+          ? deleted
+                ? 'Periodicidad cancelada. El gasto de esa fecha ya se había generado y se conserva.'
+                : 'El gasto ya se había generado y no se ha eliminado.'
+          : deleted
+          ? 'Gasto programado cancelado.'
+          : 'La programación ya no existe.';
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
     } on FirebaseFunctionsException {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -472,10 +489,12 @@ class _GastosViewState extends State<GastosView> {
                             if (canDelete)
                               IconButton(
                                 tooltip: 'Cancelar gasto programado',
-                                onPressed: isDeleting
+                                onPressed: isDeleting || scheduledAt == null
                                     ? null
                                     : () => _confirmAndDeleteSchedule(
                                         schedule.id,
+                                        scheduledAt,
+                                        data['frecuencia'] != null,
                                       ),
                                 icon: isDeleting
                                     ? const SizedBox.square(
@@ -597,8 +616,6 @@ class _GastosViewState extends State<GastosView> {
   }
 }
 
-enum _DeleteChoice { occurrence, series }
-
 class SaldosView extends StatefulWidget {
   final String groupId;
   final Set<String> myMemberIds;
@@ -653,7 +670,10 @@ class _SaldosViewState extends State<SaldosView> {
     });
     try {
       final preferences = await SharedPreferences.getInstance();
-      await preferences.setBool(_preferenceKey, _balanceMode == _BalanceMode.net);
+      await preferences.setBool(
+        _preferenceKey,
+        _balanceMode == _BalanceMode.net,
+      );
     } catch (_) {
       // Keep the selection usable when local storage is unavailable.
     }
@@ -788,7 +808,8 @@ class _SaldosViewState extends State<SaldosView> {
 
         return ListView.builder(
           padding: const EdgeInsets.all(16),
-          itemCount: 1 + widget.memberMap.length + (pagosRecibidos.isEmpty ? 0 : 1),
+          itemCount:
+              1 + widget.memberMap.length + (pagosRecibidos.isEmpty ? 0 : 1),
           itemBuilder: (context, i) {
             if (i == 0) {
               return Padding(

@@ -13,6 +13,7 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
   const { getFirestore, Timestamp } = require('firebase-admin/firestore');
   const { getMessaging } = require('firebase-admin/messaging');
   const entryPoints = require('../index');
+  const { scheduledOccurrenceId } = require('../lib/scheduled-occurrences');
   const {
     AccountMergeConflictError,
     activateAccountMerge,
@@ -881,16 +882,22 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     await assertNoExpenseWrites(groupRef);
   });
 
-  test('eliminarGasto removes an expense and every division but can preserve its series', async () => {
+  test('eliminarGasto stops recurrence and preserves other generated debts', async () => {
     const groupRef = await seedExpenseGroup();
     const created = await entryPoints.crearGasto.run(
       expenseInput({ frecuencia: 'Mensual (mismo d\u00eda todos los meses)' }),
       { auth: { uid: 'payer-uid' } },
     );
 
+    const otherExpense = groupRef.collection('gastos').doc('other-month');
+    await otherExpense.set({ scheduleId: created.scheduleId, createdByUid: 'payer-uid' });
+    const otherDebt = otherExpense.collection('divisiones').doc('alice');
+    const pending = { pagado: false, cantidadCentimos: 334, memberId: 'alice', pagadoPor: 'payer' };
+    await otherDebt.set(pending);
+
     assert.deepEqual(
       await entryPoints.eliminarGasto.run(
-        { groupId: groupRef.id, gastoId: created.gastoId, eliminarSerie: false },
+        { groupId: groupRef.id, gastoId: created.gastoId },
         { auth: { uid: 'payer-uid' } },
       ),
       { deleted: true },
@@ -902,7 +909,9 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     ]);
     assert.equal(expense.exists, false);
     assert.equal(divisions.empty, true);
-    assert.equal(schedule.exists, true);
+    assert.equal(schedule.exists, false);
+    assert.equal((await otherExpense.get()).exists, true);
+    assert.deepEqual((await otherDebt.get()).data(), pending);
   });
 
   test('eliminarGasto removes the linked series and is safe to retry', async () => {
@@ -911,7 +920,7 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
       expenseInput({ frecuencia: 'Mensual (mismo d\u00eda todos los meses)' }),
       { auth: { uid: 'payer-uid' } },
     );
-    const input = { groupId: groupRef.id, gastoId: created.gastoId, eliminarSerie: true };
+    const input = { groupId: groupRef.id, gastoId: created.gastoId };
 
     assert.deepEqual(await entryPoints.eliminarGasto.run(input, { auth: { uid: 'payer-uid' } }), { deleted: true });
     assert.deepEqual(await entryPoints.eliminarGasto.run(input, { auth: { uid: 'payer-uid' } }), { deleted: false });
@@ -921,7 +930,7 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
   test('eliminarGasto rejects an unauthenticated or unrelated caller', async () => {
     const groupRef = await seedExpenseGroup();
     const created = await entryPoints.crearGasto.run(expenseInput(), { auth: { uid: 'payer-uid' } });
-    const input = { groupId: groupRef.id, gastoId: created.gastoId, eliminarSerie: false };
+    const input = { groupId: groupRef.id, gastoId: created.gastoId };
 
     await assert.rejects(entryPoints.eliminarGasto.run(input, {}), { code: 'unauthenticated' });
     await assert.rejects(
@@ -937,7 +946,10 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
       expenseInput({ fecha: '2099-01-31' }),
       { auth: { uid: 'payer-uid' } },
     );
-    const input = { groupId: groupRef.id, scheduleId: created.scheduleId };
+    const input = {
+      groupId: groupRef.id, scheduleId: created.scheduleId,
+      scheduledForMillis: new Date('2099-01-31T12:00:00.000Z').getTime(),
+    };
 
     await assert.rejects(
       entryPoints.eliminarGastoProgramado.run(input, { auth: { uid: 'outsider-uid' } }),
@@ -945,12 +957,45 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     );
     assert.deepEqual(
       await entryPoints.eliminarGastoProgramado.run(input, { auth: { uid: 'payer-uid' } }),
-      { deleted: true },
+      { deleted: true, occurrenceGenerated: false },
     );
     assert.equal(
       (await groupRef.collection('gastosProgramados').doc(created.scheduleId).get()).exists,
       false,
     );
+  });
+
+  test('canceling a schedule after generation preserves that occurrence and its debt', async () => {
+    const groupRef = await seedExpenseGroup();
+    for (const frecuencia of [null, 'Cada 7 días']) {
+      const created = await entryPoints.crearGasto.run(
+        expenseInput({ fecha: '2099-01-31', frecuencia }),
+        { auth: { uid: 'payer-uid' } },
+      );
+      const scheduleRef = groupRef.collection('gastosProgramados').doc(created.scheduleId);
+      const scheduledAt = (await scheduleRef.get()).get('proximaFecha');
+      const occurrenceId = scheduledOccurrenceId(created.scheduleId, scheduledAt);
+      const occurrenceRef = groupRef.collection('gastos').doc(occurrenceId);
+      await occurrenceRef.set({ createdByUid: 'payer-uid', scheduleId: created.scheduleId });
+      const debtRef = occurrenceRef.collection('divisiones').doc('alice');
+      const pending = { pagado: false, cantidadCentimos: 334 };
+      await debtRef.set(pending);
+      if (frecuencia) {
+        await scheduleRef.update({ proximaFecha: Timestamp.fromMillis(scheduledAt.toMillis() + 7 * 86400000) });
+      } else {
+        await scheduleRef.delete();
+      }
+
+      const result = await entryPoints.eliminarGastoProgramado.run({
+        groupId: groupRef.id, scheduleId: created.scheduleId,
+        scheduledForMillis: scheduledAt.toMillis(),
+      }, { auth: { uid: 'payer-uid' } });
+
+      assert.deepEqual(result, { deleted: Boolean(frecuencia), occurrenceGenerated: true });
+      assert.equal((await scheduleRef.get()).exists, false);
+      assert.equal((await occurrenceRef.get()).exists, true);
+      assert.deepEqual((await debtRef.get()).data(), pending);
+    }
   });
 
   test('ejecutarGastosPeriodicos creates shares and advances recurring schedules', async () => {
