@@ -9,6 +9,8 @@ import 'package:cloud_functions/cloud_functions.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:payb2/services/auth/identity_mutation_tracker.dart';
 import 'package:payb2/services/debts/debt_queries.dart';
+import 'package:payb2/domain/group_balances.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class GrupoDetalleScreen extends StatefulWidget {
   final String groupId;
@@ -240,7 +242,7 @@ class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
                         onChanged: _refreshDerivedViews,
                       ),
                       SaldosView(
-                        key: ValueKey('saldos-$_dataRevision'),
+                        key: ValueKey('saldos-${widget.groupId}'),
                         groupId: widget.groupId,
                         memberMap: memberMap,
                         myMemberIds: _myMemberIds.toSet(),
@@ -291,6 +293,26 @@ class GastosView extends StatefulWidget {
 }
 
 class _GastosViewState extends State<GastosView> {
+  final Set<String> _deletingSchedules = {};
+  late final Stream<QuerySnapshot<Map<String, dynamic>>> _expensesStream;
+  late final Stream<QuerySnapshot<Map<String, dynamic>>> _schedulesStream;
+
+  @override
+  void initState() {
+    super.initState();
+    final groupRef = FirebaseFirestore.instance
+        .collection('groups')
+        .doc(widget.groupId);
+    _expensesStream = groupRef
+        .collection('gastos')
+        .orderBy('fecha', descending: true)
+        .snapshots();
+    _schedulesStream = groupRef
+        .collection('gastosProgramados')
+        .orderBy('proximaFecha')
+        .snapshots();
+  }
+
   Future<void> _confirmAndDelete(String gastoId, String? scheduleId) async {
     final choice = await showDialog<_DeleteChoice>(
       context: context,
@@ -326,6 +348,7 @@ class _GastosViewState extends State<GastosView> {
           'eliminarSerie': choice == _DeleteChoice.series,
         }),
       );
+      if (!mounted) return;
       widget.onChanged();
     } on FirebaseFunctionsException {
       if (!mounted) return;
@@ -335,113 +358,237 @@ class _GastosViewState extends State<GastosView> {
     }
   }
 
+  Future<void> _confirmAndDeleteSchedule(String scheduleId) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Cancelar gasto programado'),
+        content: const Text(
+          'El gasto no llegará a generarse en la fecha indicada.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Volver'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Cancelar gasto'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted ||
+        confirmed != true ||
+        _deletingSchedules.contains(scheduleId)) {
+      return;
+    }
+
+    setState(() => _deletingSchedules.add(scheduleId));
+    try {
+      await IdentityMutationTracker.shared.track(
+        () => FirebaseFunctions.instance
+            .httpsCallable('eliminarGastoProgramado')
+            .call({'groupId': widget.groupId, 'scheduleId': scheduleId}),
+      );
+      if (!mounted) return;
+      widget.onChanged();
+    } on FirebaseFunctionsException {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No se pudo cancelar el gasto')),
+      );
+    } finally {
+      if (mounted) setState(() => _deletingSchedules.remove(scheduleId));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    return StreamBuilder<QuerySnapshot>(
-      stream: FirebaseFirestore.instance
-          .collection('groups')
-          .doc(widget.groupId)
-          .collection('gastos')
-          .orderBy('fecha', descending: true)
-          .snapshots(),
-      builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Center(child: CircularProgressIndicator());
-        }
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: _expensesStream,
+      builder: (context, expensesSnapshot) {
+        return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+          stream: _schedulesStream,
+          builder: (context, schedulesSnapshot) {
+            if (expensesSnapshot.connectionState == ConnectionState.waiting ||
+                schedulesSnapshot.connectionState == ConnectionState.waiting) {
+              return const Center(child: CircularProgressIndicator());
+            }
+            if (expensesSnapshot.hasError || schedulesSnapshot.hasError) {
+              return const Center(
+                child: Text('No se pudieron cargar los gastos.'),
+              );
+            }
 
-        if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
-          return const Center(child: Text('No hay gastos registrados.'));
-        }
+            final expenses = expensesSnapshot.data?.docs ?? [];
+            final schedules = schedulesSnapshot.data?.docs ?? [];
+            if (expenses.isEmpty && schedules.isEmpty) {
+              return const Center(child: Text('No hay gastos registrados.'));
+            }
 
-        final gastos = snapshot.data!.docs.map((doc) {
-          final data = doc.data() as Map<String, dynamic>;
-          return {
-            'id': doc.id,
-            'name': data['nombre'],
-            'amount': data['cantidad'],
-            'date': (data['fecha'] as Timestamp).toDate(),
-            'description': data['descripcion'],
-            'pagadoPor': data['pagadoPor'],
-            'scheduleId': data['scheduleId'],
-            'createdByUid': data['createdByUid'],
-          };
-        }).toList();
+            return ListView(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              children: [
+                if (schedules.isNotEmpty) ...[
+                  const Padding(
+                    padding: EdgeInsets.fromLTRB(16, 8, 16, 4),
+                    child: Text(
+                      'Gastos programados',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                  ...schedules.map((schedule) {
+                    final data = schedule.data();
+                    final cents = data['cantidadCentimos'] as num?;
+                    final amount = cents != null
+                        ? cents.toDouble() / 100
+                        : (data['cantidad'] as num?)?.toDouble() ?? 0;
+                    final scheduledAt = data['proximaFecha'] as Timestamp?;
+                    final canDelete =
+                        widget.ownerUid == widget.currentUid ||
+                        data['createdByUid'] == widget.currentUid;
+                    final isDeleting = _deletingSchedules.contains(schedule.id);
 
-        return ListView.builder(
-          itemCount: gastos.length,
-          itemBuilder: (context, index) {
-            final gasto = gastos[index];
-            final isMyGasto = widget.myMemberIds.contains(gasto['pagadoPor']);
-            final canDelete =
-                widget.ownerUid == widget.currentUid ||
-                gasto['createdByUid'] == widget.currentUid;
-
-            return Card(
-              margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-              color: isMyGasto
-                  ? const Color.fromARGB(255, 192, 192, 192)
-                  : null, // color distinto si es tu gasto
-              child: Padding(
-                padding: const EdgeInsets.all(12.0),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // Parte izquierda (nombre, descripción, fecha)
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            gasto['name'],
-                            style: TextStyle(
-                              fontWeight: isMyGasto
-                                  ? FontWeight.bold
-                                  : FontWeight.normal,
-                              color: isMyGasto ? Colors.green[800] : null,
-                            ),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(gasto['description'] ?? ''),
-                          const SizedBox(height: 4),
-                          Text(
-                            DateFormat('dd/MM/yyyy').format(gasto['date']),
-                            style: const TextStyle(
-                              fontSize: 12,
-                              color: Colors.grey,
-                            ),
-                          ),
-                        ],
+                    return Card(
+                      margin: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 5,
                       ),
+                      child: ListTile(
+                        leading: const Icon(Icons.schedule),
+                        title: Text(data['nombre'] as String? ?? 'Gasto'),
+                        subtitle: Text(
+                          scheduledAt == null
+                              ? 'Fecha pendiente'
+                              : DateFormat(
+                                  'dd/MM/yyyy',
+                                ).format(scheduledAt.toDate()),
+                        ),
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text('${amount.toStringAsFixed(2)} €'),
+                            if (canDelete)
+                              IconButton(
+                                tooltip: 'Cancelar gasto programado',
+                                onPressed: isDeleting
+                                    ? null
+                                    : () => _confirmAndDeleteSchedule(
+                                        schedule.id,
+                                      ),
+                                icon: isDeleting
+                                    ? const SizedBox.square(
+                                        dimension: 20,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                        ),
+                                      )
+                                    : const Icon(Icons.delete_outline),
+                              ),
+                          ],
+                        ),
+                      ),
+                    );
+                  }),
+                ],
+                if (expenses.isNotEmpty) ...[
+                  const Padding(
+                    padding: EdgeInsets.fromLTRB(16, 12, 16, 4),
+                    child: Text(
+                      'Gastos registrados',
+                      style: TextStyle(fontWeight: FontWeight.bold),
                     ),
-                    // Parte derecha (cantidad + botón)
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.end,
-                      children: [
-                        Text(
-                          '${gasto['amount'].toStringAsFixed(2)} €',
-                          style: TextStyle(
-                            fontWeight: isMyGasto
-                                ? FontWeight.bold
-                                : FontWeight.normal,
-                            color: isMyGasto ? Colors.green[800] : null,
-                          ),
-                        ),
-                        Text(
-                          widget.memberMap[gasto['pagadoPor']]?['name'] ?? '',
-                        ),
-                        if (canDelete)
-                          IconButton(
-                            icon: const Icon(Icons.delete, color: Colors.red),
-                            onPressed: () => _confirmAndDelete(
-                              gasto['id'],
-                              gasto['scheduleId'] as String?,
+                  ),
+                  ...expenses.map((expense) {
+                    final data = expense.data();
+                    final payerId = data['pagadoPor'] as String? ?? '';
+                    final cents = data['cantidadCentimos'] as num?;
+                    final amount = cents != null
+                        ? cents.toDouble() / 100
+                        : (data['cantidad'] as num?)?.toDouble() ?? 0;
+                    final date = (data['fecha'] as Timestamp).toDate();
+                    final isMyGasto = widget.myMemberIds.contains(payerId);
+                    final canDelete =
+                        widget.ownerUid == widget.currentUid ||
+                        data['createdByUid'] == widget.currentUid;
+
+                    return Card(
+                      margin: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 5,
+                      ),
+                      color: isMyGasto
+                          ? const Color.fromARGB(255, 192, 192, 192)
+                          : null, // color distinto si es tu gasto
+                      child: Padding(
+                        padding: const EdgeInsets.all(12.0),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            // Parte izquierda (nombre, descripción, fecha)
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    data['nombre'] as String? ?? 'Gasto',
+                                    style: TextStyle(
+                                      fontWeight: isMyGasto
+                                          ? FontWeight.bold
+                                          : FontWeight.normal,
+                                      color: isMyGasto
+                                          ? Colors.green[800]
+                                          : null,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text(data['descripcion'] as String? ?? ''),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    DateFormat('dd/MM/yyyy').format(date),
+                                    style: const TextStyle(
+                                      fontSize: 12,
+                                      color: Colors.grey,
+                                    ),
+                                  ),
+                                ],
+                              ),
                             ),
-                          ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
+                            // Parte derecha (cantidad + botón)
+                            Column(
+                              crossAxisAlignment: CrossAxisAlignment.end,
+                              children: [
+                                Text(
+                                  '${amount.toStringAsFixed(2)} €',
+                                  style: TextStyle(
+                                    fontWeight: isMyGasto
+                                        ? FontWeight.bold
+                                        : FontWeight.normal,
+                                    color: isMyGasto ? Colors.green[800] : null,
+                                  ),
+                                ),
+                                Text(widget.memberMap[payerId]?['name'] ?? ''),
+                                if (canDelete)
+                                  IconButton(
+                                    icon: const Icon(
+                                      Icons.delete,
+                                      color: Colors.red,
+                                    ),
+                                    onPressed: () => _confirmAndDelete(
+                                      expense.id,
+                                      data['scheduleId'] as String?,
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  }),
+                ],
+              ],
             );
           },
         );
@@ -468,19 +615,52 @@ class SaldosView extends StatefulWidget {
   State<SaldosView> createState() => _SaldosViewState();
 }
 
+enum _BalanceMode { debts, net }
+
 class _SaldosViewState extends State<SaldosView> {
   late final Stream<QuerySnapshot<Map<String, dynamic>>> _divisionesStream;
+  _BalanceMode _balanceMode = _BalanceMode.debts;
+  bool _selectionChanged = false;
+
+  String get _preferenceKey => 'group.${widget.groupId}.balances.net';
 
   @override
   void initState() {
     super.initState();
     _divisionesStream = DebtQueries().watchGroupDivisions(widget.groupId);
+    unawaited(_loadBalanceMode());
+  }
+
+  Future<void> _loadBalanceMode() async {
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      if (!mounted || _selectionChanged) return;
+      setState(() {
+        _balanceMode = preferences.getBool(_preferenceKey) == true
+            ? _BalanceMode.net
+            : _BalanceMode.debts;
+      });
+    } catch (_) {
+      // Local preferences must not prevent viewing or settling debts.
+    }
+  }
+
+  Future<void> _selectBalanceMode(Set<_BalanceMode> selection) async {
+    final mode = selection.single;
+    setState(() {
+      _selectionChanged = true;
+      _balanceMode = mode;
+    });
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      await preferences.setBool(_preferenceKey, _balanceMode == _BalanceMode.net);
+    } catch (_) {
+      // Keep the selection usable when local storage is unavailable.
+    }
   }
 
   double _amount(Map<String, dynamic> data) {
-    final cents = data['cantidadCentimos'];
-    if (cents is num) return cents.toDouble() / 100;
-    return (data['cantidad'] as num?)?.toDouble() ?? 0;
+    return divisionAmountCents(data) / 100;
   }
 
   Future<void> _marcarPagado(
@@ -590,9 +770,11 @@ class _SaldosViewState extends State<SaldosView> {
         }
 
         final divisiones = snap.data!.docs;
-        final pendientes = divisiones
-            .where((division) => division.data()['pagado'] != true)
-            .toList();
+        final pendientes = divisiones.where((division) {
+          final data = division.data();
+          return data['pagado'] != true &&
+              data['memberId'] != data['pagadoPor'];
+        }).toList();
         final pagosRecibidos = divisiones.where((division) {
           final data = division.data();
           return data['pagado'] == true &&
@@ -601,23 +783,42 @@ class _SaldosViewState extends State<SaldosView> {
               data['pagoRegistradoPor'] == data['memberId'];
         }).toList();
 
-        if (pendientes.isEmpty && pagosRecibidos.isEmpty) {
-          return const Center(child: Text('No tienes deudas pendientes.'));
-        }
-
-        // Agrupar sumas por miembro
-        final totals = <String, double>{};
-        for (var d in pendientes) {
-          final data = d.data();
-          final memberId = data['memberId'] as String;
-          final amount = _amount(data);
-          totals[memberId] = (totals[memberId] ?? 0) + amount;
-        }
+        final balances = GroupBalances(divisiones.map((d) => d.data()));
+        final showNet = _balanceMode == _BalanceMode.net;
 
         return ListView.builder(
           padding: const EdgeInsets.all(16),
-          itemCount: widget.memberMap.length + (pagosRecibidos.isEmpty ? 0 : 1),
+          itemCount: 1 + widget.memberMap.length + (pagosRecibidos.isEmpty ? 0 : 1),
           itemBuilder: (context, i) {
+            if (i == 0) {
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 16),
+                child: Column(
+                  children: [
+                    SegmentedButton<_BalanceMode>(
+                      segments: const [
+                        ButtonSegment(
+                          value: _BalanceMode.debts,
+                          label: Text('Deudas'),
+                        ),
+                        ButtonSegment(
+                          value: _BalanceMode.net,
+                          label: Text('Balance neto'),
+                        ),
+                      ],
+                      selected: {_balanceMode},
+                      onSelectionChanged: _selectBalanceMode,
+                    ),
+                    if (pendientes.isEmpty && pagosRecibidos.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.only(top: 16),
+                        child: Text('No tienes deudas pendientes.'),
+                      ),
+                  ],
+                ),
+              );
+            }
+            i -= 1;
             if (i == widget.memberMap.length) {
               return Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -662,7 +863,10 @@ class _SaldosViewState extends State<SaldosView> {
             final memberIds = widget.memberMap.keys.toList();
             final memberId = memberIds[i];
             final name = widget.memberMap[memberId]?['name'] ?? 'Sin nombre';
-            final balance = totals[memberId] ?? 0.0;
+            final balanceCents =
+                (showNet ? balances.net : balances.debts)[memberId] ?? 0;
+            final balance = balanceCents / 100;
+            final sign = showNet && balanceCents > 0 ? '+' : '';
             final isMe = widget.myMemberIds.contains(memberId);
             final ownPendingDebts = pendientes.where((division) {
               final data = division.data();
@@ -687,9 +891,13 @@ class _SaldosViewState extends State<SaldosView> {
                     ),
                   ),
                   trailing: Text(
-                    '${balance.toStringAsFixed(2)} €',
+                    '$sign${balance.toStringAsFixed(2)} €',
                     style: TextStyle(
-                      color: balance <= 0 ? Colors.green : Colors.red,
+                      color: balanceCents == 0
+                          ? Theme.of(context).colorScheme.onSurfaceVariant
+                          : (showNet ? balanceCents > 0 : balanceCents < 0)
+                          ? Colors.green
+                          : Colors.red,
                       fontWeight: isMe ? FontWeight.bold : FontWeight.normal,
                     ),
                   ),
