@@ -293,3 +293,15 @@ test('una cuenta en proceso de fusion no puede escribir', async () => {
 function debtRef(db) {
   return doc(db, 'groups/group-1/gastos/expense-1/divisiones/debtor');
 }
+
+test('cada cuenta solo puede registrar y borrar sus propios dispositivos', async () => {
+  const owner = testEnv.authenticatedContext('creditor-uid').firestore();
+  const other = testEnv.authenticatedContext('other-uid').firestore();
+  const path = 'usuarios/creditor-uid/devices/phone';
+  const device = { fcmToken: 'phone-token', tokenUpdatedAt: serverTimestamp() };
+  await assertSucceeds(setDoc(doc(owner, path), device));
+  await assertFails(setDoc(doc(other, path), device));
+  await assertFails(setDoc(doc(owner, path), { fcmToken: 'missing-timestamp' }));
+  await assertFails(deleteDoc(doc(other, path)));
+  await assertSucceeds(deleteDoc(doc(owner, path)));
+});

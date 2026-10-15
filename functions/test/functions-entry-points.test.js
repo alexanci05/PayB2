@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const { createHash } = require('node:crypto');
 const { after, beforeEach, test } = require('node:test');
 
 if (!process.env.FIRESTORE_EMULATOR_HOST) {
@@ -252,6 +253,8 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
       newGroup.collection('gastosProgramados').doc('schedule').set({ createdByUid: 'source-uid' }),
       newGroup.collection('expenseRequests').doc('request').set({ createdByUid: 'source-uid' }),
       db.collection('usuarios').doc('source-uid').set({ deviceId: 'source-uid', fcmToken: 'token' }),
+      db.doc('usuarios/source-uid/devices/phone').set({ fcmToken: 'phone-token' }),
+      db.doc('usuarios/target-uid/devices/tablet').set({ fcmToken: 'tablet-token' }),
     ]);
 
     assert.deepEqual(
@@ -282,6 +285,9 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     assert.equal(request.get('createdByUid'), 'target-uid');
     assert.equal(user.get('deviceId'), 'target-uid');
     assert.equal(user.get('fcmToken'), 'token');
+    assert.equal((await db.doc('usuarios/target-uid/devices/phone').get()).get('fcmToken'), 'phone-token');
+    assert.equal((await db.doc('usuarios/target-uid/devices/tablet').get()).get('fcmToken'), 'tablet-token');
+    assert.equal((await db.doc('usuarios/source-uid/devices/phone').get()).exists, false);
   });
 
   test('merge ticket locks the source and can only be completed by one target', async () => {
@@ -314,6 +320,23 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     assert.equal(
       (await db.collection('groupMembers').doc('ticket-group_target-uid').get()).exists,
       true,
+    );
+  });
+
+  test('an activated merge remains recoverable after its preparation deadline', async () => {
+    const ticket = await prepareAccountMerge(db, 'source-uid');
+    await activateAccountMerge(db, 'source-uid', ticket);
+
+    const ticketId = createHash('sha256').update(ticket).digest('hex');
+    await db.collection('accountMergeTickets').doc(ticketId).update({
+      expiresAt: Timestamp.fromMillis(Date.now() - 1),
+    });
+
+    await completeAccountMerge(db, ticket, 'target-uid');
+
+    assert.equal(
+      (await db.collection('accountMerges').doc('source-uid').get()).get('status'),
+      'completed',
     );
   });
 
@@ -358,6 +381,39 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     assert.equal(membership.get('memberId'), 'target-member');
     assert.equal(sourceMember.get('reclamadoPor'), 'target-uid');
     assert.equal(targetMember.get('reclamadoPor'), 'target-uid');
+  });
+
+  test('account merge transfers every identity already owned by the source', async () => {
+    const group = db.collection('groups').doc('multi-identity-group');
+    await Promise.all([
+      group.set({ name: 'Compartido', ownerDeviceId: 'owner-uid' }),
+      db.collection('groupMembers').doc('multi-identity-group_source-uid').set({
+        groupId: 'multi-identity-group', deviceId: 'source-uid', memberId: 'source-primary',
+      }),
+      db.collection('groupMembers').doc('multi-identity-group_target-uid').set({
+        groupId: 'multi-identity-group', deviceId: 'target-uid', memberId: 'target-primary',
+      }),
+      group.collection('members').doc('source-primary').set({
+        name: 'Móvil', reclamadoPor: 'source-uid',
+      }),
+      group.collection('members').doc('source-secondary').set({
+        name: 'Tablet', reclamadoPor: 'source-uid',
+      }),
+      group.collection('members').doc('target-primary').set({
+        name: 'Cuenta', reclamadoPor: 'target-uid',
+      }),
+    ]);
+
+    await mergeAnonymousAccountData(db, 'source-uid', 'target-uid');
+
+    const [sourcePrimary, sourceSecondary, targetPrimary] = await Promise.all([
+      group.collection('members').doc('source-primary').get(),
+      group.collection('members').doc('source-secondary').get(),
+      group.collection('members').doc('target-primary').get(),
+    ]);
+    assert.equal(sourcePrimary.get('reclamadoPor'), 'target-uid');
+    assert.equal(sourceSecondary.get('reclamadoPor'), 'target-uid');
+    assert.equal(targetPrimary.get('reclamadoPor'), 'target-uid');
   });
 
   test('account merge cannot redirect the same anonymous session to another account', async () => {
@@ -803,6 +859,28 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     assert.equal((await groupRef.collection('gastos').doc(created.gastoId).get()).exists, true);
   });
 
+  test('eliminarGastoProgramado only allows its creator or the group owner', async () => {
+    const groupRef = await seedExpenseGroup();
+    const created = await entryPoints.crearGasto.run(
+      expenseInput({ fecha: '2099-01-31' }),
+      { auth: { uid: 'payer-uid' } },
+    );
+    const input = { groupId: groupRef.id, scheduleId: created.scheduleId };
+
+    await assert.rejects(
+      entryPoints.eliminarGastoProgramado.run(input, { auth: { uid: 'outsider-uid' } }),
+      { code: 'permission-denied' },
+    );
+    assert.deepEqual(
+      await entryPoints.eliminarGastoProgramado.run(input, { auth: { uid: 'payer-uid' } }),
+      { deleted: true },
+    );
+    assert.equal(
+      (await groupRef.collection('gastosProgramados').doc(created.scheduleId).get()).exists,
+      false,
+    );
+  });
+
   test('ejecutarGastosPeriodicos creates shares and advances recurring schedules', async () => {
     const scheduledDate = new Date(Date.now() - 24 * 60 * 60 * 1000);
     scheduledDate.setUTCMilliseconds(0);
@@ -947,5 +1025,32 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
       },
     }]);
     assert.equal((await db.collection('reminderDeliveries').get()).size, 1);
+  });
+
+  test('device reminders retry only failed devices and remove invalid tokens', async () => {
+    const { sendNotificationToUser } = require('../lib/device-notifications');
+    const devices = db.collection('usuarios').doc('multi-uid').collection('devices');
+    await Promise.all([
+      devices.doc('phone').set({ fcmToken: 'phone' }),
+      devices.doc('tablet').set({ fcmToken: 'tablet' }),
+      devices.doc('old').set({ fcmToken: 'invalid' }),
+    ]);
+    const sent = [];
+    let failTablet = true;
+    const messaging = {
+      send: async ({ token }) => {
+        if (token === 'invalid') {
+          throw Object.assign(new Error('Invalid'), { code: 'messaging/registration-token-not-registered' });
+        }
+        if (token === 'tablet' && failTablet) throw new Error('Unavailable');
+        sent.push(token);
+      },
+    };
+    const input = { db, messaging, uid: 'multi-uid', title: 'Aviso', body: 'Deuda', period: '2026-10-15' };
+    await assert.rejects(sendNotificationToUser(input), AggregateError);
+    assert.equal((await devices.doc('old').get()).exists, false);
+    failTablet = false;
+    await sendNotificationToUser(input);
+    assert.deepEqual(sent.sort(), ['phone', 'tablet']);
   });
 }

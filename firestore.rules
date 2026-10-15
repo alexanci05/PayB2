@@ -32,6 +32,17 @@ service cloud.firestore {
     match /usuarios/{uid} {
       allow read: if signedIn() && request.auth.uid == uid;
       allow create, update, delete: if accountCanMutate() && request.auth.uid == uid;
+
+      match /devices/{installationId} {
+        allow read: if signedIn() && request.auth.uid == uid;
+        allow create, update: if accountCanMutate() && request.auth.uid == uid &&
+          request.resource.data.keys().hasOnly(['fcmToken', 'tokenUpdatedAt']) &&
+          request.resource.data.fcmToken is string &&
+          request.resource.data.fcmToken.size() > 0 &&
+          request.resource.data.fcmToken.size() <= 4096 &&
+          request.resource.data.tokenUpdatedAt == request.time;
+        allow delete: if accountCanMutate() && request.auth.uid == uid;
+      }
     }
 
     match /groupMembers/{membershipId} {

@@ -64,9 +64,6 @@ async function consumeAccountMergeTicket(db, ticket, targetUid) {
     if (!['active', 'running'].includes(data.status)) {
       throw new AccountMergeConflictError('El ticket de fusión todavía no está activo');
     }
-    if (data.expiresAt?.toMillis() < Date.now() && !data.targetUid) {
-      throw new AccountMergeConflictError('El ticket de fusión ha caducado');
-    }
     transaction.update(ticketRef, {
       targetUid,
       status: 'running',
@@ -152,7 +149,7 @@ async function mergeGroup(db, groupId, sourceUid, targetUid) {
   const membersRef = groupRef.collection('members');
 
   await db.runTransaction(async (transaction) => {
-    const sourceClaimQuery = membersRef.where('reclamadoPor', '==', sourceUid).limit(1);
+    const sourceClaimQuery = membersRef.where('reclamadoPor', '==', sourceUid);
     const targetClaimQuery = membersRef.where('reclamadoPor', '==', targetUid).limit(1);
     const [group, sourceMembership, targetMembership, sourceClaims, targetClaims] =
       await Promise.all([
@@ -171,11 +168,13 @@ async function mergeGroup(db, groupId, sourceUid, targetUid) {
     const sourceData = sourceMembership.data();
     const sourceClaim = sourceClaims.docs[0];
     const targetClaim = targetClaims.docs[0];
-    const sourceMemberId = sourceClaim?.id ?? sourceData.memberId ?? null;
-    const targetMemberId = targetClaim?.id ?? targetMembership.data()?.memberId ?? null;
+    const sourceMemberId = sourceData.memberId ?? sourceClaim?.id ?? null;
+    const targetMemberId = targetMembership.data()?.memberId ?? targetClaim?.id ?? null;
 
-    if (sourceClaim && sourceClaim.id !== targetMemberId) {
-      transaction.update(sourceClaim.ref, { reclamadoPor: targetUid });
+    for (const claim of sourceClaims.docs) {
+      if (claim.id !== targetMemberId) {
+        transaction.update(claim.ref, { reclamadoPor: targetUid });
+      }
     }
 
     const mergedMemberId = targetMemberId ?? sourceMemberId;
@@ -225,9 +224,31 @@ async function mergeAnonymousAccountData(db, sourceUid, targetUid) {
 
   const sourceUserRef = db.collection('usuarios').doc(sourceUid);
   const targetUserRef = db.collection('usuarios').doc(targetUid);
+  const sourceDevices = await sourceUserRef.collection('devices').get();
+  for (const device of sourceDevices.docs) {
+    const targetDeviceRef = targetUserRef.collection('devices').doc(device.id);
+    await db.runTransaction(async (transaction) => {
+      const [sourceDevice, targetDevice] = await transaction.getAll(device.ref, targetDeviceRef);
+      if (!sourceDevice.exists) return;
+      const sourceUpdated = sourceDevice.get('tokenUpdatedAt')?.toMillis() ?? 0;
+      const targetUpdated = targetDevice.get('tokenUpdatedAt')?.toMillis() ?? 0;
+      if (!targetDevice.exists || sourceUpdated > targetUpdated) {
+        transaction.set(targetDeviceRef, sourceDevice.data());
+      }
+      transaction.delete(device.ref);
+    });
+  }
   await db.runTransaction(async (transaction) => {
-    const sourceUser = await transaction.get(sourceUserRef);
+    const [sourceUser, targetUser] = await transaction.getAll(sourceUserRef, targetUserRef);
     if (!sourceUser.exists) return;
+    const targetLegacyToken = targetUser.get('fcmToken');
+    if (targetLegacyToken && targetLegacyToken !== sourceUser.get('fcmToken')) {
+      const legacyId = `legacy_${createHash('sha256').update(targetLegacyToken).digest('hex')}`;
+      transaction.set(targetUserRef.collection('devices').doc(legacyId), {
+        fcmToken: targetLegacyToken,
+        tokenUpdatedAt: targetUser.get('tokenUpdatedAt') ?? FieldValue.serverTimestamp(),
+      });
+    }
     transaction.set(targetUserRef, {
       ...sourceUser.data(),
       deviceId: targetUid,

@@ -15,6 +15,7 @@ const {
   divisionId,
 } = require('./lib/scheduled-occurrences');
 const { debtNotificationForTransition } = require('./lib/debt-notifications');
+const { sendNotificationToUser } = require('./lib/device-notifications');
 const {
   AccountMergeConflictError,
   activateAccountMerge,
@@ -422,6 +423,37 @@ exports.eliminarGasto = functions.https.onCall(async (data, context) => {
   });
 });
 
+exports.eliminarGastoProgramado = functions.https.onCall(async (data, context) => {
+  if (!context.auth) {
+    throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesión');
+  }
+
+  const { groupId, scheduleId } = data || {};
+  const validId = (id) => typeof id === 'string' && id.length > 0 && id.length <= 1500 && !id.includes('/');
+  if (!validId(groupId) || !validId(scheduleId)) {
+    throw new functions.https.HttpsError('invalid-argument', 'La programación no es válida');
+  }
+
+  const uid = context.auth.uid;
+  const groupRef = db.collection('groups').doc(groupId);
+  const scheduleRef = groupRef.collection('gastosProgramados').doc(scheduleId);
+  return db.runTransaction(async (transaction) => {
+    await assertAccountCanMutate(transaction, uid);
+    const [groupSnap, scheduleSnap] = await transaction.getAll(groupRef, scheduleRef);
+    if (!scheduleSnap.exists) return { deleted: false };
+    if (!groupSnap.exists ||
+        (groupSnap.get('ownerDeviceId') !== uid && scheduleSnap.get('createdByUid') !== uid)) {
+      throw new functions.https.HttpsError(
+        'permission-denied',
+        'No puedes eliminar este gasto programado',
+      );
+    }
+
+    transaction.delete(scheduleRef);
+    return { deleted: true };
+  });
+});
+
 exports.unirseAGrupo = functions.https.onCall(async (data, context) => {
   if (!context.auth) {
     throw new functions.https.HttpsError("unauthenticated", "Debes iniciar sesión");
@@ -671,12 +703,7 @@ exports.recordatorioDeudas = functions.pubsub
       console.log("Inicio de recordatorioDeudas");
       const deliveryFailures = [];
 
-      const [usuariosSnap, membershipsSnap] = await Promise.all([
-        db.collection("usuarios").get(),
-        db.collection("groupMembers").get(),
-      ]);
-
-      console.log(`Usuarios encontrados: ${usuariosSnap.size}`);
+      const membershipsSnap = await db.collection('groupMembers').get();
       const period = reminderPeriod();
 
       const accountUidsByGroup = new Map();
@@ -717,50 +744,16 @@ exports.recordatorioDeudas = functions.pubsub
         }
       }
 
-      for (const usuarioDoc of usuariosSnap.docs) {
-        const deviceId = usuarioDoc.id;
-        const token = usuarioDoc.get("fcmToken");
-
-        if (!token) {
-          console.log(`Usuario ${deviceId} sin token, se omite`);
-          continue;
-        }
-
-        if (debtorUids.has(deviceId)) {
-          const deliveryRef = db.collection('reminderDeliveries').doc(deviceId);
-          const delivery = await deliveryRef.get();
-          if (delivery.exists && delivery.get('period') === period) {
-            console.log(`Recordatorio ${period} ya enviado a ${deviceId}`);
-            continue;
-          }
-          try {
-            await messaging.send({
-              token: token,
-              notification: {
-                title: "Recordatorio de deudas",
-                body: "Tienes deudas pendientes en la app.",
-              },
-            });
-            await deliveryRef.set({
-              period,
-              userUid: deviceId,
-              sentAt: FieldValue.serverTimestamp(),
-            });
-            console.log(`Notificación enviada a ${deviceId}`);
-          } catch (error) {
-            if (isInvalidMessagingToken(error)) {
-              await usuarioDoc.ref.update({
-                fcmToken: FieldValue.delete(),
-                tokenInvalidatedAt: FieldValue.serverTimestamp(),
-              });
-              console.warn(`Token FCM inválido eliminado para ${deviceId}`);
-            } else {
-              console.error(`No se pudo notificar a ${deviceId}:`, error);
-              deliveryFailures.push(error);
-            }
-          }
-        } else {
-          console.log(`Usuario ${deviceId} no tiene deudas pendientes`);
+      for (const uid of debtorUids) {
+        try {
+          await sendNotificationToUser({
+            db, messaging, uid, period,
+            title: 'Recordatorio de deudas',
+            body: 'Tienes deudas pendientes en la app.',
+          });
+        } catch (error) {
+          console.error(`No se pudo notificar a ${uid}:`, error);
+          deliveryFailures.push(error);
         }
       }
 
@@ -800,28 +793,5 @@ async function sendNotificationToMember({ groupId, memberId, title, body }) {
     return;
   }
 
-  const userRef = db.collection('usuarios').doc(uid);
-  const userDoc = await userRef.get();
-  const token = userDoc.get('fcmToken');
-  if (!token) {
-    console.log(`Usuario ${uid} no tiene token de notificación.`);
-    return;
-  }
-
-  try {
-    await messaging.send({ token, notification: { title, body } });
-    console.log(`Notificación de deuda enviada al usuario ${uid}`);
-  } catch (error) {
-    if (!isInvalidMessagingToken(error)) throw error;
-    await userRef.update({
-      fcmToken: FieldValue.delete(),
-      tokenInvalidatedAt: FieldValue.serverTimestamp(),
-    });
-    console.warn(`Token FCM inválido eliminado para ${uid}`);
-  }
-}
-
-function isInvalidMessagingToken(error) {
-  return error?.code === "messaging/registration-token-not-registered" ||
-    error?.code === "messaging/invalid-registration-token";
+  await sendNotificationToUser({ db, messaging, uid, title, body });
 }
