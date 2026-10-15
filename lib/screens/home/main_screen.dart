@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_speed_dial/flutter_speed_dial.dart'; // Biblioteca para el botón flotante con múltiples opciones
@@ -223,11 +225,75 @@ class WalletScreen extends StatefulWidget {
 class _WalletScreenState extends State<WalletScreen> {
   late Future<List<_DebtItem>> _futureDebts;
   final _debtQueries = DebtQueries();
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>?
+  _membershipsSubscription;
+  final Map<String, StreamSubscription<QuerySnapshot<Map<String, dynamic>>>>
+  _divisionSubscriptions = {};
+  Timer? _reloadTimer;
 
   @override
   void initState() {
     super.initState();
     _futureDebts = _loadDebts();
+    _watchDebtChanges();
+  }
+
+  @override
+  void dispose() {
+    _reloadTimer?.cancel();
+    _membershipsSubscription?.cancel();
+    for (final subscription in _divisionSubscriptions.values) {
+      subscription.cancel();
+    }
+    super.dispose();
+  }
+
+  Future<void> _watchDebtChanges() async {
+    final uid = await _loadUid();
+    if (!mounted) return;
+
+    _membershipsSubscription = FirebaseFirestore.instance
+        .collection('groupMembers')
+        .where('deviceId', isEqualTo: uid)
+        .snapshots()
+        .listen((snapshot) {
+          if (!mounted) return;
+          final groupIds = snapshot.docs
+              .map((document) => document.data()['groupId'] as String?)
+              .whereType<String>()
+              .toSet();
+
+          final removedGroups = _divisionSubscriptions.keys
+              .where((groupId) => !groupIds.contains(groupId))
+              .toList();
+          for (final groupId in removedGroups) {
+            _divisionSubscriptions.remove(groupId)?.cancel();
+          }
+
+          for (final groupId in groupIds) {
+            _divisionSubscriptions.putIfAbsent(
+              groupId,
+              () => _debtQueries
+                  .watchGroupDivisions(groupId)
+                  .listen(
+                    (_) => _scheduleReload(),
+                    onError: (_, _) => _scheduleReload(),
+                  ),
+            );
+          }
+          _scheduleReload();
+        }, onError: (_, _) => _scheduleReload());
+  }
+
+  void _scheduleReload() {
+    if (!mounted) return;
+    _reloadTimer?.cancel();
+    _reloadTimer = Timer(const Duration(milliseconds: 150), _reloadDebts);
+  }
+
+  void _reloadDebts() {
+    if (!mounted) return;
+    setState(() => _futureDebts = _loadDebts());
   }
 
   Future<String> _loadUid() async {
@@ -335,9 +401,7 @@ class _WalletScreenState extends State<WalletScreen> {
       );
 
       if (!mounted) return;
-      setState(() {
-        _futureDebts = _loadDebts();
-      });
+      _reloadDebts();
     } catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
