@@ -1059,7 +1059,7 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     assert.equal((await groupRef.collection('gastos').get()).empty, true);
   });
 
-  test('onDeudaPagada sends the creditor a notification when a debtor pays', async () => {
+  test('onDeudaPagada notifies the creditor once when the same event is retried', async () => {
     await Promise.all([
       db.collection('groups').doc('group-1').collection('members').doc('creditor').set({ reclamadoPor: 'creditor-uid' }),
       db.collection('usuarios').doc('creditor-uid').set({ fcmToken: 'emulator-token' }),
@@ -1070,20 +1070,25 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     messaging.send = async (message) => sent.push(message);
 
     try {
-      await entryPoints.onDeudaPagada.run(
-        {
-          before: { data: () => ({ pagado: false }) },
-          after: {
-            data: () => ({
-              pagado: true,
-              memberId: 'debtor',
-              pagadoPor: 'creditor',
-              pagoRegistradoPor: 'debtor',
-            }),
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await entryPoints.onDeudaPagada.run(
+          {
+            before: { data: () => ({ pagado: false }) },
+            after: {
+              data: () => ({
+                pagado: true,
+                memberId: 'debtor',
+                pagadoPor: 'creditor',
+                pagoRegistradoPor: 'debtor',
+              }),
+            },
           },
-        },
-        { params: { groupId: 'group-1', gastoId: 'expense-1', divisionId: 'debtor' } },
-      );
+          {
+            eventId: 'payment-event-1',
+            params: { groupId: 'group-1', gastoId: 'expense-1', divisionId: 'debtor' },
+          },
+        );
+      }
     } finally {
       messaging.send = originalSend;
     }

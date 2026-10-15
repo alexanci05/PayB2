@@ -555,6 +555,7 @@ exports.onDeudaPagada = functions
       if (!notification) return null;
 
       await sendNotificationToMember({
+        eventId: context.eventId,
         groupId: context.params.groupId,
         memberId: notification.targetMemberId,
         title: notification.title,
@@ -790,7 +791,7 @@ exports.recordatorioDeudas = functions.pubsub
   }
 );
 
-async function sendNotificationToMember({ groupId, memberId, title, body }) {
+async function sendNotificationToMember({ groupId, memberId, title, body, eventId }) {
   const memberDoc = await db
     .collection('groups')
     .doc(groupId)
@@ -809,5 +810,5 @@ async function sendNotificationToMember({ groupId, memberId, title, body }) {
     return;
   }
 
-  await sendNotificationToUser({ db, messaging, uid, title, body });
+  await sendNotificationToUser({ db, messaging, uid, title, body, eventId });
 }
