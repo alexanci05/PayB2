@@ -92,14 +92,8 @@ Future<void> removeCurrentDeviceMessagingToken() async {
 Future<void> _saveMessagingToken(String uid, String token) async {
   final userDoc = FirebaseFirestore.instance.collection('usuarios').doc(uid);
   final installationId = await _getInstallationId();
-  await FirebaseFirestore.instance.runTransaction((transaction) async {
-    final user = await transaction.get(userDoc);
-    transaction.set(userDoc.collection('devices').doc(installationId), {
-      'fcmToken': token,
-      'tokenUpdatedAt': FieldValue.serverTimestamp(),
-    });
-    if (user.data()?['fcmToken'] == token) {
-      transaction.update(userDoc, {'fcmToken': FieldValue.delete()});
-    }
+  await userDoc.collection('devices').doc(installationId).set({
+    'fcmToken': token,
+    'tokenUpdatedAt': FieldValue.serverTimestamp(),
   });
 }

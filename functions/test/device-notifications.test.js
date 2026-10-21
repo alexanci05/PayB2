@@ -110,10 +110,14 @@ test('invalid device tokens are removed and daily period deduplication remains u
   await send(messaging);
   assert.deepEqual(calls, ['A', 'B']);
   const daily = fixture(['A']);
+  daily.records.set('usuarios/user', { fcmToken: 'ignored-root-token' });
+  daily.records.set('reminderDeliveries/user', { period: '2026-10-16' });
   const dailyMessaging = { send: async ({ token }) => calls.push(token) };
   await daily.send(dailyMessaging, null, '2026-10-16');
   await daily.send(dailyMessaging, null, '2026-10-16');
   await daily.send(dailyMessaging, null, '2026-10-17');
   assert.deepEqual(calls, ['A', 'B', 'A', 'A']);
+  assert.deepEqual(daily.records.get('usuarios/user'), { fcmToken: 'ignored-root-token' });
+  assert.deepEqual(daily.records.get('reminderDeliveries/user'), { period: '2026-10-16' });
   assert.equal([...daily.records.keys()].some((key) => key.startsWith('eventNotificationDeliveries/')), false);
 });

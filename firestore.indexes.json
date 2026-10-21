@@ -35,6 +35,13 @@
   ],
   "fieldOverrides": [
     {
+      "collectionGroup": "gastosProgramados",
+      "fieldPath": "proximaEjecucion",
+      "indexes": [
+        { "order": "ASCENDING", "queryScope": "COLLECTION_GROUP" }
+      ]
+    },
+    {
       "collectionGroup": "divisiones",
       "fieldPath": "groupId",
       "indexes": [

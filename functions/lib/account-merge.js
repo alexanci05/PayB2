@@ -79,7 +79,7 @@ async function cancelAccountMerge(db, sourceUid, ticket) {
   const mergeRef = db.collection('accountMerges').doc(sourceUid);
   await db.runTransaction(async (transaction) => {
     const [ticketSnapshot, mergeSnapshot] = await transaction.getAll(ticketRef, mergeRef);
-    // Legacy cancellations deleted tickets; without ownership evidence, never touch a lock.
+    // Without ticket ownership evidence, never touch a merge lock.
     if (!ticketSnapshot.exists) {
       if (mergeSnapshot.exists) {
         throw new AccountMergeConflictError('La fusión ya no se puede cancelar');
@@ -253,25 +253,6 @@ async function mergeAnonymousAccountData(db, sourceUid, targetUid) {
       transaction.delete(device.ref);
     });
   }
-  await db.runTransaction(async (transaction) => {
-    const [sourceUser, targetUser] = await transaction.getAll(sourceUserRef, targetUserRef);
-    if (!sourceUser.exists) return;
-    const targetLegacyToken = targetUser.get('fcmToken');
-    if (targetLegacyToken && targetLegacyToken !== sourceUser.get('fcmToken')) {
-      const legacyId = `legacy_${createHash('sha256').update(targetLegacyToken).digest('hex')}`;
-      transaction.set(targetUserRef.collection('devices').doc(legacyId), {
-        fcmToken: targetLegacyToken,
-        tokenUpdatedAt: targetUser.get('tokenUpdatedAt') ?? FieldValue.serverTimestamp(),
-      });
-    }
-    transaction.set(targetUserRef, {
-      ...sourceUser.data(),
-      deviceId: targetUid,
-      mergedAt: FieldValue.serverTimestamp(),
-    }, { merge: true });
-    transaction.delete(sourceUserRef);
-  });
-
   await mergeRef.set({
     status: 'completed',
     completedAt: FieldValue.serverTimestamp(),

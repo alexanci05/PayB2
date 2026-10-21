@@ -164,6 +164,40 @@ test('un miembro que no es propietario no puede renombrar el grupo', async () =>
   }));
 });
 
+test('la administracion compartida permite renombrar solo a miembros y se puede revocar', async () => {
+  const member = doc(testEnv.authenticatedContext('debtor-uid').firestore(), 'groups/group-1');
+  const outsider = doc(testEnv.authenticatedContext('outsider-uid').firestore(), 'groups/group-1');
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    await updateDoc(doc(context.firestore(), 'groups/group-1'), { allMembersAreAdmins: true });
+  });
+  await assertSucceeds(updateDoc(member, { name: 'Compartido' }));
+  await assertFails(updateDoc(outsider, { name: 'Ajeno' }));
+  await assertFails(updateDoc(member, { name: '' }));
+  await assertFails(updateDoc(member, { name: 'A'.repeat(81) }));
+  await assertFails(updateDoc(member, { name: 'Cambio', ownerDeviceId: 'debtor-uid' }));
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    await setDoc(doc(context.firestore(), 'accountMerges/debtor-uid'), { status: 'prepared' });
+  });
+  await assertFails(updateDoc(member, { name: 'Bloqueado' }));
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    await deleteDoc(doc(context.firestore(), 'accountMerges/debtor-uid'));
+    await updateDoc(doc(context.firestore(), 'groups/group-1'), { allMembersAreAdmins: false });
+  });
+  await assertFails(updateDoc(member, { name: 'Revocado' }));
+});
+
+test('el flag solo se configura por callable y los miembros siguen siendo de creacion exclusiva del servidor', async () => {
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    await updateDoc(doc(context.firestore(), 'groups/group-1'), { allMembersAreAdmins: true });
+  });
+  for (const uid of ['creditor-uid', 'debtor-uid', 'outsider-uid']) {
+    const db = testEnv.authenticatedContext(uid).firestore();
+    await assertFails(updateDoc(doc(db, 'groups/group-1'), { allMembersAreAdmins: false }));
+    await assertFails(updateDoc(doc(db, 'groups/group-1'), { name: 'Cambio', allMembersAreAdmins: false }));
+    await assertFails(setDoc(doc(db, 'groups/group-1/members/new'), { name: 'Nuevo', reclamadoPor: null }));
+  }
+});
+
 test('el propietario no puede eliminar directamente un grupo con subcolecciones', async () => {
   const db = testEnv.authenticatedContext('creditor-uid').firestore();
 
@@ -251,23 +285,46 @@ test('otro miembro no puede cerrar una deuda ajena', async () => {
   );
 });
 
-test('el acreedor puede devolver un pago a pendiente', async () => {
+test('la administracion compartida no permite pagar ni reabrir deudas ajenas', async () => {
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    await updateDoc(doc(context.firestore(), 'groups/group-1'), { allMembersAreAdmins: true });
+  });
+  const db = testEnv.authenticatedContext('other-uid').firestore();
+  for (const pagoRegistradoPor of ['other', 'creditor', 'debtor']) {
+    await assertFails(updateDoc(debtRef(db), {
+      pagado: true, pagadoEn: serverTimestamp(), pagoRegistradoPor,
+    }));
+  }
+  await assertFails(deleteDoc(doc(db, 'groups/group-1/gastos/expense-1')));
+  await assertFails(deleteDoc(doc(db, 'groups/group-1/gastosProgramados/schedule-1')));
   await testEnv.withSecurityRulesDisabled(async (context) => {
     await updateDoc(debtRef(context.firestore()), {
-      pagado: true,
-      pagadoEn: new Date(),
-      pagoRegistradoPor: 'debtor',
+      pagado: true, pagadoEn: new Date(), pagoRegistradoPor: 'debtor',
     });
   });
-  const db = testEnv.authenticatedContext('creditor-uid').firestore();
+  await assertFails(updateDoc(debtRef(db), {
+    pagado: false, pagadoEn: deleteField(), pagoRegistradoPor: deleteField(),
+  }));
+});
 
-  await assertSucceeds(
-    updateDoc(debtRef(db), {
-      pagado: false,
-      pagadoEn: deleteField(),
-      pagoRegistradoPor: deleteField(),
-    }),
-  );
+test('el acreedor puede reabrir pagos confirmados por el deudor o por el mismo', async () => {
+  const db = testEnv.authenticatedContext('creditor-uid').firestore();
+  for (const registeredBy of ['debtor', 'creditor']) {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(debtRef(context.firestore()), {
+        pagado: true,
+        pagadoEn: new Date(),
+        pagoRegistradoPor: registeredBy,
+      });
+    });
+    await assertSucceeds(
+      updateDoc(debtRef(db), {
+        pagado: false,
+        pagadoEn: deleteField(),
+        pagoRegistradoPor: deleteField(),
+      }),
+    );
+  }
 });
 
 test('una cuenta en proceso de fusion no puede escribir', async () => {

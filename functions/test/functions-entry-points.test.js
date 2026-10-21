@@ -13,7 +13,7 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
   const { getFirestore, Timestamp } = require('firebase-admin/firestore');
   const { getMessaging } = require('firebase-admin/messaging');
   const entryPoints = require('../index');
-  const { scheduledOccurrenceId } = require('../lib/scheduled-occurrences');
+  const { scheduledOccurrenceId, scheduleInstant, nextScheduledDate, todayInZone } = require('../lib/scheduled-occurrences');
   const {
     AccountMergeConflictError,
     activateAccountMerge,
@@ -40,7 +40,7 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
   async function seedExpenseGroup() {
     const groupRef = db.collection('groups').doc('expense-group');
     await Promise.all([
-      groupRef.set({ name: 'Viaje', ownerDeviceId: 'payer-uid' }),
+      groupRef.set({ name: 'Viaje', ownerDeviceId: 'payer-uid', timeZone: 'Europe/Madrid' }),
       db.collection('groupMembers').doc('expense-group_payer-uid').set({
         groupId: 'expense-group',
         deviceId: 'payer-uid',
@@ -84,7 +84,6 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
       pagadoPor: 'payer',
       participantes: ['alice', 'bob'],
       frecuencia: null,
-      timeZoneOffsetMinutes: 0,
       ...overrides,
     };
   }
@@ -98,6 +97,13 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     assert.equal(expenses.size, 0);
     assert.equal(schedules.size, 0);
     assert.equal(requests.size, 0);
+  }
+
+  function groupInput(overrides = {}) {
+    return {
+      requestId: db.collection('groups').doc().id, nombre: 'Viaje',
+      miembros: ['Ana', 'Luis'], timeZone: 'Europe/Madrid', ...overrides,
+    };
   }
 
   async function assertNoGroupCreationWrites() {
@@ -130,7 +136,7 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
 
   test('crearGrupo reserves a code and creates the group membership', async () => {
     const result = await entryPoints.crearGrupo.run(
-      { requestId: db.collection('groups').doc().id, nombre: 'Viaje', miembros: ['Ana', 'Luis'] },
+      groupInput(),
       { auth: { uid: 'owner-uid' } },
     );
 
@@ -146,6 +152,8 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
 
     assert.deepEqual(group.data().name, 'Viaje');
     assert.equal(group.data().ownerDeviceId, 'owner-uid');
+    assert.equal(group.data().allMembersAreAdmins, false);
+    assert.equal(group.get('timeZone'), 'Europe/Madrid');
     assert.equal(code.data().groupId, result.groupId);
     assert.deepEqual(membership.data().groupId, result.groupId);
     assert.deepEqual(members.docs.map((member) => member.data().name), ['Ana', 'Luis']);
@@ -156,7 +164,7 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
 
     await assert.rejects(
       entryPoints.crearGrupo.run(
-        { requestId: db.collection('groups').doc().id, nombre: 'Viaje', miembros },
+        groupInput({ miembros }),
         { auth: { uid: 'owner-uid' } },
       ),
       { code: 'invalid-argument' },
@@ -166,7 +174,7 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
   });
 
   test('crearGrupo replays the same request with one group, code and membership', async () => {
-    const input = { requestId: db.collection('groups').doc().id, nombre: 'Viaje', miembros: ['Ana', 'Luis'] };
+    const input = groupInput();
     const auth = { auth: { uid: 'owner-uid' } };
 
     const first = await entryPoints.crearGrupo.run(input, auth);
@@ -177,7 +185,7 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
   });
 
   test('crearGrupo handles concurrent retries with one group, code and membership', async () => {
-    const input = { requestId: db.collection('groups').doc().id, nombre: 'Viaje', miembros: ['Ana', 'Luis'] };
+    const input = groupInput();
     const auth = { auth: { uid: 'owner-uid' } };
 
     const outcomes = await Promise.allSettled([
@@ -191,7 +199,7 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
   });
 
   test('crearGrupo rejects a changed payload for an existing requestId', async () => {
-    const input = { requestId: db.collection('groups').doc().id, nombre: 'Viaje', miembros: ['Ana', 'Luis'] };
+    const input = groupInput();
     const auth = { auth: { uid: 'owner-uid' } };
     const first = await entryPoints.crearGrupo.run(input, auth);
 
@@ -203,7 +211,7 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
   });
 
   test('crearGrupo recovers identical IDs after the first response is lost', async () => {
-    const input = { requestId: db.collection('groups').doc().id, nombre: 'Viaje', miembros: ['Ana', 'Luis'] };
+    const input = groupInput();
     const auth = { auth: { uid: 'owner-uid' } };
     await entryPoints.crearGrupo.run(input, auth);
     const original = (await db.collection('groups').get()).docs[0];
@@ -213,6 +221,114 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
 
     assert.deepEqual(recovered, { groupId: original.id, groupCode: original.get('groupCode') });
     await assertSingleCreatedGroup(recovered);
+  });
+
+  test('configurarAdministracionGrupo is owner-only, validates the flag and blocks merging accounts', async () => {
+    const groupRef = await seedExpenseGroup();
+    const input = { groupId: groupRef.id, allMembersAreAdmins: true };
+    await assert.rejects(entryPoints.configurarAdministracionGrupo.run(input, {}), { code: 'unauthenticated' });
+    await db.collection('groupMembers').doc('expense-group_other-uid').set({
+      groupId: groupRef.id, deviceId: 'other-uid',
+    });
+    for (const value of ['true', null, 1]) {
+      await assert.rejects(entryPoints.configurarAdministracionGrupo.run(
+        { ...input, allMembersAreAdmins: value }, { auth: { uid: 'payer-uid' } },
+      ), { code: 'invalid-argument' });
+    }
+    for (const enabled of [true, false]) {
+      assert.deepEqual(await entryPoints.configurarAdministracionGrupo.run(
+        { ...input, allMembersAreAdmins: enabled }, { auth: { uid: 'payer-uid' } },
+      ), { allMembersAreAdmins: enabled });
+      assert.equal((await groupRef.get()).get('allMembersAreAdmins'), enabled);
+      for (const uid of ['other-uid', 'outsider-uid']) {
+        await assert.rejects(entryPoints.configurarAdministracionGrupo.run(input, { auth: { uid } }),
+          { code: 'permission-denied' });
+      }
+    }
+    await db.collection('accountMerges').doc('payer-uid').set({ status: 'prepared' });
+    await assert.rejects(entryPoints.configurarAdministracionGrupo.run(input, { auth: { uid: 'payer-uid' } }),
+      { code: 'failed-precondition' });
+    assert.equal((await groupRef.get()).get('allMembersAreAdmins'), false);
+  });
+
+  function addMember(groupId, nombre, requestId = db.collection('groups').doc().id, uid = 'payer-uid') {
+    return entryPoints.agregarMiembroGrupo.run({ groupId, nombre, requestId }, { auth: { uid } });
+  }
+
+  test('agregarMiembroGrupo permits owners or shared admins, never outsiders, and blocks account merges', async () => {
+    const groupRef = await seedExpenseGroup();
+    const input = { groupId: groupRef.id, nombre: 'Nuevo', requestId: 'A'.repeat(20) };
+    await assert.rejects(entryPoints.agregarMiembroGrupo.run(input, {}), { code: 'unauthenticated' });
+    await db.collection('groupMembers').doc('expense-group_other-uid').set({
+      groupId: groupRef.id, deviceId: 'other-uid',
+    });
+    await assert.rejects(addMember(groupRef.id, 'Nuevo', undefined, 'other-uid'), { code: 'permission-denied' });
+    await groupRef.update({ allMembersAreAdmins: true });
+    await assert.rejects(addMember(groupRef.id, 'Nuevo', undefined, 'outsider-uid'), { code: 'permission-denied' });
+    await addMember(groupRef.id, 'Nuevo', undefined, 'other-uid');
+    await groupRef.update({ allMembersAreAdmins: false });
+    await assert.rejects(addMember(groupRef.id, 'Otro', undefined, 'other-uid'), { code: 'permission-denied' });
+    await db.collection('groupMembers').doc('expense-group_payer-uid').delete();
+    await addMember(groupRef.id, 'Del propietario');
+    await db.collection('accountMerges').doc('payer-uid').set({ status: 'prepared' });
+    await assert.rejects(addMember(groupRef.id, 'Bloqueado'), { code: 'failed-precondition' });
+    assert.equal((await groupRef.collection('members').get()).size, 6);
+  });
+
+  test('agregarMiembroGrupo validates names and request IDs without partial writes', async () => {
+    const groupRef = await seedExpenseGroup();
+    for (const nombre of ['', '   ', 'A'.repeat(51), null]) {
+      await assert.rejects(addMember(groupRef.id, nombre), { code: 'invalid-argument' });
+    }
+    for (const requestId of ['short', 'A'.repeat(21), '/'.repeat(20)]) {
+      await assert.rejects(addMember(groupRef.id, 'Nuevo', requestId), { code: 'invalid-argument' });
+    }
+    await assert.rejects(addMember(groupRef.id, ' aNA '), { code: 'already-exists' });
+    await addMember(groupRef.id, 'A'.repeat(50));
+    assert.equal((await groupRef.collection('members').get()).size, 5);
+  });
+
+  test('agregarMiembroGrupo trims names and replays concurrent retries with one deterministic ID', async () => {
+    const groupRef = await seedExpenseGroup();
+    const requestId = 'A'.repeat(20);
+    const results = await Promise.all([
+      addMember(groupRef.id, '  Lucia  ', requestId),
+      addMember(groupRef.id, 'Lucia', requestId),
+    ]);
+    assert.deepEqual(results[0], results[1]);
+    assert.deepEqual(await addMember(groupRef.id, 'Lucia', requestId), results[0]);
+    await assert.rejects(addMember(groupRef.id, 'Otra', requestId), { code: 'failed-precondition' });
+    const member = await groupRef.collection('members').doc(results[0].memberId).get();
+    assert.deepEqual(member.data(), { name: 'Lucia', reclamadoPor: null });
+    assert.equal((await groupRef.collection('members').get()).size, 5);
+  });
+
+  test('agregarMiembroGrupo serializes concurrent case-insensitive duplicates', async () => {
+    const groupRef = await seedExpenseGroup();
+    const results = await Promise.allSettled([
+      addMember(groupRef.id, ' Lucia '), addMember(groupRef.id, 'LUCIA'),
+    ]);
+    assert.equal(results.filter((result) => result.status === 'fulfilled').length, 1);
+    assert.equal(results.find((result) => result.status === 'rejected').reason.code, 'already-exists');
+    assert.equal((await groupRef.collection('members').get()).size, 5);
+  });
+
+  test('agregarMiembroGrupo enforces the 50-person limit across concurrent additions and replays at capacity', async () => {
+    const groupRef = await seedExpenseGroup();
+    const batch = db.batch();
+    for (let index = 0; index < 45; index += 1) {
+      batch.create(groupRef.collection('members').doc(`extra-${index}`), { name: `Extra ${index}`, reclamadoPor: null });
+    }
+    await batch.commit();
+    const requests = ['A'.repeat(20), 'B'.repeat(20)];
+    const results = await Promise.allSettled(requests.map((requestId, index) =>
+      addMember(groupRef.id, `Ultimo ${index}`, requestId)));
+    const winner = results.findIndex((result) => result.status === 'fulfilled');
+    assert.equal(results.filter((result) => result.status === 'fulfilled').length, 1);
+    assert.equal(results.find((result) => result.status === 'rejected').reason.code, 'resource-exhausted');
+    assert.deepEqual(await addMember(groupRef.id, `Ultimo ${winner}`, requests[winner]), results[winner].value);
+    assert.equal((await groupRef.collection('members').get()).size, 50);
+    assert.equal((await groupRef.get()).get('memberCount'), 50);
   });
 
   test('unirseAGrupo creates a membership and remains idempotent', async () => {
@@ -284,8 +400,7 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     assert.equal(expense.get('createdByUid'), 'target-uid');
     assert.equal(schedule.get('createdByUid'), 'target-uid');
     assert.equal(request.get('createdByUid'), 'target-uid');
-    assert.equal(user.get('deviceId'), 'target-uid');
-    assert.equal(user.get('fcmToken'), 'token');
+    assert.equal(user.exists, false);
     assert.equal((await db.doc('usuarios/target-uid/devices/phone').get()).get('fcmToken'), 'phone-token');
     assert.equal((await db.doc('usuarios/target-uid/devices/tablet').get()).get('fcmToken'), 'tablet-token');
     assert.equal((await db.doc('usuarios/source-uid/devices/phone').get()).exists, false);
@@ -307,7 +422,7 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     await activateAccountMerge(db, 'source-uid', ticket);
     await assert.rejects(
       entryPoints.crearGrupo.run(
-        { requestId: db.collection('groups').doc().id, nombre: 'Bloqueado', miembros: ['Ana'] },
+        groupInput({ nombre: 'Bloqueado', miembros: ['Ana'] }),
         { auth: { uid: 'source-uid' } },
       ),
       (error) => error.code === 'failed-precondition',
@@ -347,7 +462,7 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
 
     assert.equal((await db.collection('accountMerges').doc('source-uid').get()).exists, false);
     const created = await entryPoints.crearGrupo.run(
-      { requestId: db.collection('groups').doc().id, nombre: 'Disponible', miembros: ['Ana'] },
+      groupInput({ nombre: 'Disponible', miembros: ['Ana'] }),
       { auth: { uid: 'source-uid' } },
     );
     assert.ok(created.groupId);
@@ -387,7 +502,7 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     assert.deepEqual((await mergeRef.get()).data(), originalLock);
     await assert.rejects(
       entryPoints.crearGrupo.run(
-        { requestId: db.collection('groups').doc().id, nombre: 'Bloqueado', miembros: ['Ana'] },
+        groupInput({ nombre: 'Bloqueado', miembros: ['Ana'] }),
         { auth: { uid: 'source-uid' } },
       ),
       { code: 'failed-precondition' },
@@ -538,7 +653,7 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     assert.equal((await groupRef.collection('members').doc('bob').get()).get('reclamadoPor'), null);
   });
 
-  test('reclamarMiembro restores a legacy claim missing membership.memberId', async () => {
+  test('reclamarMiembro restores the primary identity pointer idempotently', async () => {
     const { groupRef, membershipRef } = await seedClaimGroup();
     await groupRef.collection('members').doc('alice').update({ reclamadoPor: 'claimant-uid' });
 
@@ -576,8 +691,8 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     assert.equal(expense.nombre, 'Cena');
     assert.equal(expense.descripcion, 'Cena del viaje');
     assert.equal(expense.cantidadCentimos, 1001);
-    assert.equal(expense.cantidad, 10.01);
-    assert.equal(expense.fecha.toDate().toISOString().slice(0, 10), '2024-01-31');
+    assert.equal(expense.cantidad, undefined);
+    assert.equal(expense.fecha, '2024-01-31');
     assert.equal(expense.pagadoPor, 'payer');
     assert.equal(expense.createdByMemberId, 'payer');
     assert.equal(expense.createdByUid, 'payer-uid');
@@ -592,9 +707,9 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
       const division = divisionDoc.data();
       assert.equal(division.memberId, divisionDoc.id);
       assert.equal(division.groupId, groupRef.id);
-      assert.equal(division.cantidad, division.cantidadCentimos / 100);
+      assert.equal(division.cantidad, undefined);
       assert.equal(division.pagadoPor, 'payer');
-      assert.equal(division.fecha.toDate().toISOString().slice(0, 10), '2024-01-31');
+      assert.equal(division.fecha, '2024-01-31');
       assert.equal(division.nombre, 'Cena');
       assert.ok(division.created);
       assert.equal(Boolean(division.pagadoEn), divisionDoc.id === 'payer');
@@ -621,30 +736,26 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     assert.equal(schedule.nombre, 'Cena');
     assert.equal(schedule.descripcion, 'Cena del viaje');
     assert.equal(schedule.cantidadCentimos, 1001);
-    assert.equal(schedule.cantidad, 10.01);
+    assert.equal(schedule.cantidad, undefined);
     assert.equal(schedule.pagadoPor, 'payer');
     assert.deepEqual(schedule.participantes, ['alice', 'bob']);
     assert.equal(schedule.frecuencia, frecuencia);
     assert.equal(schedule.diaAncla, 31);
-    assert.equal(schedule.proximaFecha.toDate().toISOString().slice(0, 10), '2099-01-31');
+    assert.equal(schedule.proximaFecha, '2099-01-31');
+    assert.equal(schedule.timeZone, 'Europe/Madrid');
+    assert.equal(schedule.proximaEjecucion.toDate().toISOString(), '2099-01-30T23:00:00.000Z');
     assert.equal(schedule.createdByMemberId, 'payer');
     assert.equal(schedule.createdByUid, 'payer-uid');
     assert.ok(schedule.created);
   });
 
-  test('crearGasto interprets today using the device time-zone offset', async () => {
+  test('crearGasto interprets today using the fixed group zone, not the device', async () => {
     const groupRef = await seedExpenseGroup();
-    const utcDate = new Date().toISOString().slice(0, 10);
-    const offsetMinutes = [14 * 60, -14 * 60].find((offset) =>
-      new Date(Date.now() + offset * 60 * 1000).toISOString().slice(0, 10) !== utcDate,
-    );
-    assert.notEqual(offsetMinutes, undefined);
-    const clientDate = new Date(Date.now() + offsetMinutes * 60 * 1000)
-      .toISOString()
-      .slice(0, 10);
-
+    const zone = 'Pacific/Auckland';
+    await groupRef.update({ timeZone: zone });
+    const groupDate = todayInZone(zone);
     const result = await entryPoints.crearGasto.run(
-      expenseInput({ fecha: clientDate, timeZoneOffsetMinutes: offsetMinutes }),
+      expenseInput({ fecha: groupDate }),
       { auth: { uid: 'payer-uid' } },
     );
 
@@ -652,6 +763,7 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     assert.equal(result.scheduleId, null);
     assert.equal((await groupRef.collection('gastos').get()).size, 1);
     assert.equal((await groupRef.collection('gastosProgramados').get()).size, 0);
+    assert.equal((await groupRef.collection('gastos').doc(result.gastoId).get()).get('fecha'), groupDate);
   });
 
   test('crearGasto creates the initial occurrence and next schedule for a past recurring expense', async () => {
@@ -674,12 +786,12 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     const schedule = schedules.docs[0].data();
     assert.equal(expense.scheduleId, result.scheduleId);
     assert.equal(expense.occurrenceKey, result.gastoId);
-    assert.equal(expense.fecha.toDate().toISOString(), '2024-01-31T12:00:00.000Z');
+    assert.equal(expense.fecha, '2024-01-31');
     assert.equal(expense.cantidadCentimos, 1001);
     assert.equal(expense.pagadoPor, 'payer');
     assert.equal(schedule.frecuencia, frecuencia);
     assert.equal(schedule.diaAncla, 31);
-    assert.equal(schedule.proximaFecha.toDate().toISOString(), '2024-02-29T12:00:00.000Z');
+    assert.equal(schedule.proximaFecha, '2024-02-29');
     assert.deepEqual(schedule.participantes, ['alice', 'bob']);
 
     const divisions = await expenses.docs[0].ref.collection('divisiones').get();
@@ -705,13 +817,13 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
       groupRef.collection('gastos').where('scheduleId', '==', result.scheduleId).get(),
     ]);
     const occurrenceDates = new Set(
-      expenses.docs.map((doc) => doc.get('fecha').toDate().toISOString()),
+      expenses.docs.map((doc) => doc.get('fecha')),
     );
     assert.equal(schedule.get('diaAncla'), 31);
-    assert.ok(schedule.get('proximaFecha').toMillis() > Date.now());
-    assert.ok(occurrenceDates.has('2024-01-31T12:00:00.000Z'));
-    assert.ok(occurrenceDates.has('2024-02-29T12:00:00.000Z'));
-    assert.ok(occurrenceDates.has('2024-03-31T12:00:00.000Z'));
+    assert.ok(schedule.get('proximaEjecucion').toMillis() > Date.now());
+    assert.ok(occurrenceDates.has('2024-01-31'));
+    assert.ok(occurrenceDates.has('2024-02-29'));
+    assert.ok(occurrenceDates.has('2024-03-31'));
   });
 
   test('crearGasto replays an immediate expense without creating more expenses or divisions', async () => {
@@ -828,7 +940,7 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     assert.equal(divisions.size, 3);
   });
 
-  test('crearGasto rejects callers without group membership or payer ownership', async () => {
+  test('crearGasto rejects callers without group membership', async () => {
     const groupRef = await seedExpenseGroup();
     const input = expenseInput({ fecha: '2099-01-31' });
     await assert.rejects(
@@ -839,11 +951,54 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
       entryPoints.crearGasto.run(input, { auth: { uid: 'outsider-uid' } }),
       { code: 'permission-denied' },
     );
-    await assert.rejects(
-      entryPoints.crearGasto.run({ ...input, pagadoPor: 'other-payer' }, { auth: { uid: 'payer-uid' } }),
-      { code: 'permission-denied' },
-    );
     await assertNoExpenseWrites(groupRef);
+  });
+
+  test('crearGasto accepts existing claimed or unclaimed payers and records the actual primary author', async () => {
+    const groupRef = await seedExpenseGroup();
+    await groupRef.collection('members').doc('primary-author').set({ name: 'Autor', reclamadoPor: 'payer-uid' });
+    await db.collection('groupMembers').doc('expense-group_payer-uid').update({ memberId: 'primary-author' });
+    for (const pagadoPor of ['other-payer', 'alice']) {
+      const result = await entryPoints.crearGasto.run(
+        expenseInput({ pagadoPor, participantes: ['bob'], frecuencia: 'Cada 7 d\u00edas' }),
+        { auth: { uid: 'payer-uid' } },
+      );
+      for (const ref of [groupRef.collection('gastos').doc(result.gastoId),
+        groupRef.collection('gastosProgramados').doc(result.scheduleId)]) {
+        const doc = await ref.get();
+        assert.equal(doc.get('pagadoPor'), pagadoPor);
+        assert.equal(doc.get('createdByUid'), 'payer-uid');
+        assert.equal(doc.get('createdByMemberId'), 'primary-author');
+      }
+    }
+  });
+
+  test('on-behalf schedules without an author identity survive account merge and preserve their payer', async () => {
+    const groupRef = await seedExpenseGroup();
+    await db.collection('groupMembers').doc('expense-group_author-uid').set({
+      groupId: groupRef.id, deviceId: 'author-uid', memberId: 'other-payer',
+    });
+    const input = expenseInput({ fecha: '2099-01-31', pagadoPor: 'other-payer' });
+    const result = await entryPoints.crearGasto.run(input, { auth: { uid: 'author-uid' } });
+    const scheduleRef = groupRef.collection('gastosProgramados').doc(result.scheduleId);
+    assert.equal((await scheduleRef.get()).get('createdByMemberId'), undefined);
+    await mergeAnonymousAccountData(db, 'author-uid', 'target-uid');
+    assert.deepEqual(await entryPoints.crearGasto.run(input, { auth: { uid: 'target-uid' } }), result);
+    const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+    await scheduleRef.update({
+      proximaFecha: yesterday,
+      proximaEjecucion: Timestamp.fromDate(scheduleInstant(yesterday, 'Europe/Madrid')),
+    });
+    await entryPoints.ejecutarGastosPeriodicos.run({});
+    const expenses = await groupRef.collection('gastos').get();
+    assert.equal(expenses.size, 1);
+    assert.equal(expenses.docs[0].get('pagadoPor'), 'other-payer');
+    assert.equal(expenses.docs[0].get('createdByUid'), 'target-uid');
+    assert.equal(expenses.docs[0].get('createdByMemberId'), undefined);
+    assert.equal((await groupRef.collection('members').doc('other-payer').get()).get('reclamadoPor'), 'other-uid');
+    const shares = await expenses.docs[0].ref.collection('divisiones').get();
+    assert.ok(shares.docs.every((share) => share.get('pagadoPor') === 'other-payer'));
+    assert.equal(shares.docs.find((share) => share.id === 'other-payer').get('pagado'), true);
   });
 
   test('crearGasto rejects unknown participants and invalid amounts atomically', async () => {
@@ -851,6 +1006,11 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     const input = expenseInput({ fecha: '2099-01-31' });
     await assert.rejects(
       entryPoints.crearGasto.run({ ...input, participantes: ['alice', 'missing'] }, { auth: { uid: 'payer-uid' } }),
+      { code: 'permission-denied' },
+    );
+    await assertNoExpenseWrites(groupRef);
+    await assert.rejects(
+      entryPoints.crearGasto.run({ ...input, pagadoPor: 'missing' }, { auth: { uid: 'payer-uid' } }),
       { code: 'permission-denied' },
     );
     await assertNoExpenseWrites(groupRef);
@@ -940,7 +1100,32 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     assert.equal((await groupRef.collection('gastos').doc(created.gastoId).get()).exists, true);
   });
 
-  test('eliminarGastoProgramado only allows its creator or the group owner', async () => {
+  test('shared admins can delete others expenses and schedules, but ordinary members and outsiders cannot', async () => {
+    const groupRef = await seedExpenseGroup();
+    await db.collection('groupMembers').doc('expense-group_other-uid').set({
+      groupId: groupRef.id, deviceId: 'other-uid',
+    });
+    const expenseRef = groupRef.collection('gastos').doc('someone-elses');
+    const scheduleRef = groupRef.collection('gastosProgramados').doc('someone-elses');
+    await expenseRef.set({ createdByUid: 'payer-uid' });
+    await scheduleRef.set({ createdByUid: 'payer-uid' });
+    const expenseInput = { groupId: groupRef.id, gastoId: expenseRef.id };
+    const scheduleInput = { groupId: groupRef.id, scheduleId: scheduleRef.id, scheduledFor: '2026-01-01' };
+    for (const flag of [undefined, true, false]) {
+      if (flag !== undefined) await groupRef.update({ allMembersAreAdmins: flag });
+      const denied = flag === true ? ['outsider-uid'] : ['other-uid', 'outsider-uid'];
+      for (const uid of denied) {
+        await assert.rejects(entryPoints.eliminarGasto.run(expenseInput, { auth: { uid } }), { code: 'permission-denied' });
+        await assert.rejects(entryPoints.eliminarGastoProgramado.run(scheduleInput, { auth: { uid } }), { code: 'permission-denied' });
+      }
+    }
+    await groupRef.update({ allMembersAreAdmins: true });
+    assert.deepEqual(await entryPoints.eliminarGasto.run(expenseInput, { auth: { uid: 'other-uid' } }), { deleted: true });
+    assert.deepEqual(await entryPoints.eliminarGastoProgramado.run(scheduleInput, { auth: { uid: 'other-uid' } }),
+      { deleted: true, occurrenceGenerated: false });
+  });
+
+  test('eliminarGastoProgramado only allows its creator or the group owner without shared administration', async () => {
     const groupRef = await seedExpenseGroup();
     const created = await entryPoints.crearGasto.run(
       expenseInput({ fecha: '2099-01-31' }),
@@ -948,7 +1133,7 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     );
     const input = {
       groupId: groupRef.id, scheduleId: created.scheduleId,
-      scheduledForMillis: new Date('2099-01-31T12:00:00.000Z').getTime(),
+      scheduledFor: '2099-01-31',
     };
 
     await assert.rejects(
@@ -981,14 +1166,18 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
       const pending = { pagado: false, cantidadCentimos: 334 };
       await debtRef.set(pending);
       if (frecuencia) {
-        await scheduleRef.update({ proximaFecha: Timestamp.fromMillis(scheduledAt.toMillis() + 7 * 86400000) });
+        const nextDate = nextScheduledDate(scheduledAt, frecuencia);
+        await scheduleRef.update({
+          proximaFecha: nextDate,
+          proximaEjecucion: Timestamp.fromDate(scheduleInstant(nextDate, 'Europe/Madrid')),
+        });
       } else {
         await scheduleRef.delete();
       }
 
       const result = await entryPoints.eliminarGastoProgramado.run({
         groupId: groupRef.id, scheduleId: created.scheduleId,
-        scheduledForMillis: scheduledAt.toMillis(),
+        scheduledFor: scheduledAt,
       }, { auth: { uid: 'payer-uid' } });
 
       assert.deepEqual(result, { deleted: Boolean(frecuencia), occurrenceGenerated: true });
@@ -999,10 +1188,8 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
   });
 
   test('ejecutarGastosPeriodicos creates shares and advances recurring schedules', async () => {
-    const scheduledDate = new Date(Date.now() - 24 * 60 * 60 * 1000);
-    scheduledDate.setUTCMilliseconds(0);
-    const scheduledAt = Timestamp.fromDate(scheduledDate);
-    const expectedNextDate = new Date(scheduledDate.getTime() + 7 * 24 * 60 * 60 * 1000);
+    const scheduledDate = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+    const expectedNextDate = nextScheduledDate(scheduledDate, 'Cada 7 días');
     const scheduleRef = db.collection('groups').doc('group-1').collection('gastosProgramados').doc('schedule-1');
     await Promise.all([
       db.collection('groups').doc('group-1').set({ name: 'Viaje' }),
@@ -1011,7 +1198,9 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
         cantidadCentimos: 1001,
         pagadoPor: 'member-b',
         participantes: ['member-a', 'member-b', 'member-c'],
-        proximaFecha: scheduledAt,
+        proximaFecha: scheduledDate,
+        proximaEjecucion: Timestamp.fromDate(scheduleInstant(scheduledDate, 'Pacific/Auckland')),
+        timeZone: 'Pacific/Auckland',
         frecuencia: 'Cada 7 días',
         createdByMemberId: 'member-b',
         createdByUid: 'owner-uid',
@@ -1030,8 +1219,8 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
       [['member-a', 334, false], ['member-b', 334, true], ['member-c', 333, false]],
     );
     assert.equal(
-      (await scheduleRef.get()).data().proximaFecha.toDate().toISOString(),
-      expectedNextDate.toISOString(),
+      (await scheduleRef.get()).data().proximaFecha,
+      expectedNextDate,
     );
   });
 
@@ -1045,7 +1234,9 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
         cantidadCentimos: 1000,
         pagadoPor: 'payer',
         participantes: ['debtor'],
-        proximaFecha: Timestamp.fromMillis(Date.now() - 1000),
+        proximaFecha: '2024-01-31',
+        proximaEjecucion: Timestamp.fromDate(scheduleInstant('2024-01-31', 'Europe/Madrid')),
+        timeZone: 'Europe/Madrid',
         frecuencia: 'Cada 7 días',
         createdByMemberId: 'payer',
         createdByUid: 'source-uid',
@@ -1062,7 +1253,7 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
   test('onDeudaPagada notifies the creditor once when the same event is retried', async () => {
     await Promise.all([
       db.collection('groups').doc('group-1').collection('members').doc('creditor').set({ reclamadoPor: 'creditor-uid' }),
-      db.collection('usuarios').doc('creditor-uid').set({ fcmToken: 'emulator-token' }),
+      db.doc('usuarios/creditor-uid/devices/phone').set({ fcmToken: 'emulator-token' }),
     ]);
     const sent = [];
     const messaging = getMessaging();
@@ -1104,7 +1295,7 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
 
   test('recordatorioDeudas notifies a user with an outstanding debt', async () => {
     await Promise.all([
-      db.collection('usuarios').doc('debtor-uid').set({ fcmToken: 'reminder-token' }),
+      db.doc('usuarios/debtor-uid/devices/phone').set({ fcmToken: 'reminder-token' }),
       db.collection('groupMembers').doc('group-1_debtor-uid').set({
         groupId: 'group-1',
         deviceId: 'debtor-uid',
@@ -1124,7 +1315,6 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
         pagadoPor: 'creditor',
         pagado: false,
         cantidadCentimos: 1250,
-        cantidad: 12.50,
       }),
     ]);
     const sent = [];

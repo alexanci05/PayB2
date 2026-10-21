@@ -1,5 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:payb2/domain/expense_split.dart';
+import 'package:payb2/domain/calendar_date.dart';
+import 'package:timezone/timezone.dart' as tz;
 
 void main() {
   group('parseAmountCents', () {
@@ -56,107 +58,36 @@ void main() {
     });
   });
 
-  group('recurrence', () {
-    test('clamps month and year recurrences to the end of the month', () {
-      expect(
-        nextOccurrenceDate(
-          DateTime(2025, 1, 31),
-          'Mensual (mismo día todos los meses)',
-        ),
-        DateTime(2025, 2, 28),
-      );
-      expect(
-        nextOccurrenceDate(
-          DateTime(2024, 1, 31),
-          'Mensual (mismo día todos los meses)',
-        ),
-        DateTime(2024, 2, 29),
-      );
-      expect(
-        nextOccurrenceDate(DateTime(2024, 2, 29), 'Anual (mismo día cada año)'),
-        DateTime(2025, 2, 28),
-      );
-    });
-
-    test('restores the anchor day after monthly February clamps', () {
-      for (final year in [2024, 2025]) {
-        final january = DateTime.utc(year, 1, 31, 12, 34, 56, 789, 123);
-        final february = nextOccurrenceDate(
-          january,
-          'Mensual (mismo día todos los meses)',
-          anchorDay: 31,
-        );
-        expect(
-          february,
-          DateTime.utc(year, 2, year == 2024 ? 29 : 28, 12, 34, 56, 789, 123),
-        );
-        expect(
-          nextOccurrenceDate(
-            february!,
-            'Mensual (mismo día todos los meses)',
-            anchorDay: 31,
-          ),
-          DateTime.utc(year, 3, 31, 12, 34, 56, 789, 123),
-        );
+  group('calendar dates', () {
+    test('preserves and validates calendar components', () {
+      expect(formatCalendarDate('2026-11-01'), '01/11/2026');
+      expect(calendarDateString(parseCalendarDate('2024-02-29')), '2024-02-29');
+      for (final value in [
+        '0000-01-01',
+        '2025-02-29',
+        '2026-13-01',
+        '2026-1-01',
+        '2026-01-01T00:00:00Z',
+      ]) {
+        expect(() => parseCalendarDate(value), throwsFormatException);
       }
     });
 
-    test('restores the anchor day after a quarterly clamp', () {
-      final april = nextOccurrenceDate(
-        DateTime(2025, 1, 31),
-        'Trimestral (mismo día cada 3 meses)',
-        anchorDay: 31,
-      );
-      expect(april, DateTime(2025, 4, 30));
+    test('today uses the group zone across midnight and DST', () {
+      final instant = DateTime.utc(2026, 3, 29, 1, 30);
       expect(
-        nextOccurrenceDate(
-          april!,
-          'Trimestral (mismo día cada 3 meses)',
-          anchorDay: 31,
+        calendarDateString(todayInTimeZone('Europe/Madrid', now: instant)),
+        '2026-03-29',
+      );
+      expect(
+        calendarDateString(
+          todayInTimeZone('America/Los_Angeles', now: instant),
         ),
-        DateTime(2025, 7, 31),
+        '2026-03-28',
       );
-    });
-
-    test('restores leap day for an anchored annual recurrence', () {
-      var occurrence = DateTime.utc(2024, 2, 29);
-      for (final year in [2025, 2026, 2027, 2028]) {
-        occurrence = nextOccurrenceDate(
-          occurrence,
-          'Anual (mismo día cada año)',
-          anchorDay: 29,
-        )!;
-        expect(occurrence, DateTime.utc(year, 2, year == 2028 ? 29 : 28));
-      }
-    });
-
-    test('keeps fixed-day frequencies independent of the anchor day', () {
-      final date = DateTime.utc(2025, 2, 28, 12);
-      for (final days in [7, 15, 30, 365]) {
-        expect(
-          nextOccurrenceDate(date, 'Cada $days días', anchorDay: 31),
-          date.add(Duration(days: days)),
-        );
-      }
-    });
-
-    test('rejects an invalid calendar anchor day', () {
       expect(
-        () => nextOccurrenceDate(
-          DateTime.utc(2025, 2, 28),
-          'Mensual (mismo día todos los meses)',
-          anchorDay: 0,
-        ),
-        throwsArgumentError,
-      );
-    });
-
-    test('uses a stable ID for a schedule timestamp', () {
-      final date = DateTime.utc(2025, 1, 2, 3, 4, 5, 6, 7);
-
-      expect(
-        scheduledOccurrenceId('schedule-1', date),
-        scheduledOccurrenceId('schedule-1', date.toLocal()),
+        () => todayInTimeZone('invalid/zone'),
+        throwsA(isA<tz.LocationNotFoundException>()),
       );
     });
   });

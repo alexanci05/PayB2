@@ -3,7 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:payb2/screens/crear_gasto/crear_gasto.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:intl/intl.dart';
+import 'package:payb2/domain/calendar_date.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:fl_chart/fl_chart.dart';
@@ -12,6 +12,10 @@ import 'package:payb2/services/debts/debt_queries.dart';
 import 'package:payb2/domain/group_balances.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:payb2/services/network/connection_status.dart';
+import 'package:payb2/screens/group_history/group_history_screen.dart';
+import 'package:payb2/services/debts/debt_payments.dart';
+import 'package:payb2/services/groups/group_context.dart';
+import 'package:payb2/screens/group_settings/group_settings_screen.dart';
 
 class GrupoDetalleScreen extends StatefulWidget {
   final String groupId;
@@ -27,9 +31,8 @@ class GrupoDetalleScreen extends StatefulWidget {
 }
 
 class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
-  List<String> _myMemberIds = [];
-  List<Map<String, String>> _members = [];
-  late Future<Map<String, dynamic>> _miembroYMapa;
+  late final GroupContext _group;
+  bool _claimingIdentity = false;
   int _dataRevision = 0;
 
   late final String _uid;
@@ -39,72 +42,21 @@ class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
     super.initState();
     _uid = FirebaseAuth.instance.currentUser!.uid;
 
-    _miembroYMapa = _obtenerMiembroYMapa();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _checkOrAskMember();
-    });
+    _group = GroupContext(widget.groupId, _uid)..start();
   }
 
-  Future<Map<String, dynamic>> _obtenerMiembroYMapa() async {
-    final groupRef = FirebaseFirestore.instance
-        .collection('groups')
-        .doc(widget.groupId);
-    final groupSnapshot = await groupRef.get();
-    final snap = await groupRef.collection('members').get();
-
-    final members = snap.docs;
-
-    final memberMap = {
-      for (var m in members)
-        m.id: {'name': m['name'], 'reclamadoPor': m['reclamadoPor']},
-    };
-
-    return {
-      'memberMap': memberMap,
-      'ownerUid': groupSnapshot.data()?['ownerDeviceId'] as String?,
-    };
+  @override
+  void dispose() {
+    _group.dispose();
+    super.dispose();
   }
 
-  Future<void> _checkOrAskMember() async {
-    final db = FirebaseFirestore.instance;
-    final membershipFuture = db
-        .collection('groupMembers')
-        .doc('${widget.groupId}_$_uid')
-        .get();
-
-    final snapReclamado = await db
-        .collection('groups')
-        .doc(widget.groupId)
-        .collection('members')
-        .where('reclamadoPor', isEqualTo: _uid)
-        .get();
-
-    if (snapReclamado.docs.isNotEmpty) {
-      final membership = await membershipFuture;
-      final primaryMemberId = membership.data()?['memberId'] as String?;
-      if (!mounted) return;
-      setState(() {
-        _myMemberIds = snapReclamado.docs.map((doc) => doc.id).toList()..sort();
-        if (primaryMemberId != null && _myMemberIds.remove(primaryMemberId)) {
-          _myMemberIds.insert(0, primaryMemberId);
-        }
-      });
-      return;
-    }
-
-    final snap = await db
-        .collection('groups')
-        .doc(widget.groupId)
-        .collection('members')
-        .where('reclamadoPor', isNull: true)
-        .get();
-
-    _members = snap.docs
-        .map((d) => {'id': d.id, 'name': d['name'] as String})
+  Future<void> _claimIdentity() async {
+    if (_claimingIdentity || _group.myMemberIds.isNotEmpty) return;
+    final available = _group.members.entries
+        .where((entry) => entry.value['reclamadoPor'] == null)
         .toList();
-
-    if (!mounted) return;
-    if (_members.isEmpty) {
+    if (available.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('No quedan identidades libres en este grupo'),
@@ -119,12 +71,12 @@ class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
       builder: (ctx) => SimpleDialog(
         title: const Text('¿Quién eres en este grupo?'),
         children: [
-          for (var m in _members)
+          for (final member in available)
             SimpleDialogOption(
               onPressed: () {
-                Navigator.pop(ctx, m['id']);
+                Navigator.pop(ctx, member.key);
               },
-              child: Text(m['name']!),
+              child: Text(member.value['name'] as String? ?? 'Miembro'),
             ),
           SimpleDialogOption(
             onPressed: () {
@@ -136,16 +88,15 @@ class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
       ),
     );
 
-    if (chosen == null) return;
+    if (chosen == null || !mounted) return;
 
+    setState(() => _claimingIdentity = true);
     try {
-      final result = await IdentityMutationTracker.shared.track(
+      await IdentityMutationTracker.shared.track(
         () => FirebaseFunctions.instance
             .httpsCallable('reclamarMiembro')
             .callObserved({'groupId': widget.groupId, 'memberId': chosen}),
       );
-      if (!mounted) return;
-      setState(() => _myMemberIds = [result.data['memberId'] as String]);
     } on FirebaseFunctionsException catch (error) {
       if (!mounted) return;
       if (error.code == 'failed-precondition') {
@@ -154,12 +105,18 @@ class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
             content: Text('Otro usuario acaba de reclamar ese miembro'),
           ),
         );
-        await _checkOrAskMember();
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('No se pudo reclamar la identidad')),
         );
       }
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No se pudo reclamar la identidad')),
+      );
+    } finally {
+      if (mounted) setState(() => _claimingIdentity = false);
     }
   }
 
@@ -169,15 +126,12 @@ class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
   }
 
   Future<void> _onCrearGasto(BuildContext context) async {
-    final memberId = _myMemberIds.firstOrNull;
-    if (memberId == null) return;
-
     await Navigator.push(
       context,
       MaterialPageRoute(
         builder: (context) => CrearGastoScreen(
           groupId: widget.groupId,
-          currentMemberId: memberId,
+          initialPayerId: _group.myMemberIds.firstOrNull,
         ),
       ),
     );
@@ -186,32 +140,71 @@ class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return FutureBuilder<Map<String, dynamic>>(
-      future: _miembroYMapa,
-      builder: (context, snapshot) {
-        if (snapshot.hasError) {
+    return ListenableBuilder(
+      listenable: _group,
+      builder: (context, _) {
+        if ((!_group.ready && _group.error != null) ||
+            (_group.ready && !_group.exists)) {
           return Scaffold(
             appBar: AppBar(title: Text(widget.groupName)),
             body: Center(
-              child: Text('No se pudo cargar el grupo: ${snapshot.error}'),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text('No se pudo cargar el grupo.'),
+                  const SizedBox(height: 8),
+                  FilledButton.icon(
+                    onPressed: _group.start,
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('Reintentar'),
+                  ),
+                ],
+              ),
             ),
           );
         }
-        if (!snapshot.hasData) {
+        if (!_group.ready) {
           return const Scaffold(
             body: Center(child: CircularProgressIndicator()),
           );
         }
 
-        final memberMap =
-            snapshot.data!['memberMap'] as Map<String, Map<String, dynamic>>;
-        final ownerUid = snapshot.data!['ownerUid'] as String?;
+        final memberMap = _group.members;
+        final myMemberIds = _group.myMemberIds;
 
         return DefaultTabController(
           length: 3,
           child: Scaffold(
             appBar: AppBar(
-              title: Text(widget.groupName),
+              title: Text(_group.name ?? widget.groupName),
+              actions: [
+                IconButton(
+                  tooltip: 'Ajustes del grupo',
+                  icon: const Icon(Icons.settings_outlined),
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) =>
+                          GroupSettingsScreen(groupId: widget.groupId),
+                    ),
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Historial de pagos',
+                  icon: const Icon(Icons.history),
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => GroupHistoryScreen(
+                        groupId: widget.groupId,
+                        memberNames: {
+                          for (final entry in memberMap.entries)
+                            entry.key: entry.value['name'] as String,
+                        },
+                        myMemberIds: myMemberIds.toSet(),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
               bottom: const TabBar(
                 tabs: [
                   Tab(text: 'Gastos'),
@@ -222,13 +215,31 @@ class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
             ),
             body: Column(
               children: [
-                if (_myMemberIds.isNotEmpty)
+                if (_group.error != null)
+                  Material(
+                    color: Theme.of(context).colorScheme.errorContainer,
+                    child: ListTile(
+                      title: const Text('No se pudo actualizar el grupo'),
+                      trailing: IconButton(
+                        tooltip: 'Reintentar',
+                        onPressed: _group.start,
+                        icon: const Icon(Icons.refresh),
+                      ),
+                    ),
+                  ),
+                if (myMemberIds.isNotEmpty)
                   Padding(
                     padding: const EdgeInsets.all(8.0),
                     child: Text(
-                      'Eres: ${_myMemberIds.map((id) => memberMap[id]?['name'] ?? 'Miembro desconocido').join(', ')}',
+                      'Eres: ${myMemberIds.map((id) => memberMap[id]?['name'] ?? 'Miembro desconocido').join(', ')}',
                       style: const TextStyle(fontWeight: FontWeight.bold),
                     ),
+                  )
+                else
+                  TextButton.icon(
+                    onPressed: _claimingIdentity ? null : _claimIdentity,
+                    icon: const Icon(Icons.person_outline),
+                    label: const Text('Identificarse'),
                   ),
                 Expanded(
                   child: TabBarView(
@@ -236,16 +247,16 @@ class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
                       GastosView(
                         groupId: widget.groupId,
                         memberMap: memberMap,
-                        myMemberIds: _myMemberIds.toSet(),
+                        myMemberIds: myMemberIds.toSet(),
                         currentUid: _uid,
-                        ownerUid: ownerUid,
+                        isAdmin: _group.isAdmin,
                         onChanged: _refreshDerivedViews,
                       ),
                       SaldosView(
                         key: ValueKey('saldos-${widget.groupId}'),
                         groupId: widget.groupId,
                         memberMap: memberMap,
-                        myMemberIds: _myMemberIds.toSet(),
+                        myMemberIds: myMemberIds.toSet(),
                       ),
                       EstadisticasView(
                         key: ValueKey('estadisticas-$_dataRevision'),
@@ -256,12 +267,10 @@ class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
                 ),
               ],
             ),
-            floatingActionButton: _myMemberIds.isEmpty
-                ? null
-                : FloatingActionButton(
-                    onPressed: () => _onCrearGasto(context),
-                    child: const Icon(Icons.add),
-                  ),
+            floatingActionButton: FloatingActionButton(
+              onPressed: () => _onCrearGasto(context),
+              child: const Icon(Icons.add),
+            ),
           ),
         );
       },
@@ -271,19 +280,21 @@ class _GrupoDetalleScreenState extends State<GrupoDetalleScreen> {
 
 // Pantalla de Gastos ------------------------------------------
 class GastosView extends StatefulWidget {
+  final FirebaseFirestore? firestore;
   final String groupId;
   final Map<String, Map<String, dynamic>> memberMap;
   final Set<String> myMemberIds;
   final String currentUid;
-  final String? ownerUid;
+  final bool isAdmin;
   final VoidCallback onChanged;
 
   const GastosView({
     super.key,
+    this.firestore,
     required this.groupId,
     required this.memberMap,
     required this.currentUid,
-    required this.ownerUid,
+    required this.isAdmin,
     required this.onChanged,
     required this.myMemberIds,
   });
@@ -300,7 +311,7 @@ class _GastosViewState extends State<GastosView> {
   @override
   void initState() {
     super.initState();
-    final groupRef = FirebaseFirestore.instance
+    final groupRef = (widget.firestore ?? FirebaseFirestore.instance)
         .collection('groups')
         .doc(widget.groupId);
     _expensesStream = groupRef
@@ -355,7 +366,7 @@ class _GastosViewState extends State<GastosView> {
 
   Future<void> _confirmAndDeleteSchedule(
     String scheduleId,
-    Timestamp scheduledFor,
+    String scheduledFor,
     bool recurring,
   ) async {
     final confirmed = await showDialog<bool>(
@@ -393,7 +404,7 @@ class _GastosViewState extends State<GastosView> {
             .callObserved<Map<String, dynamic>>({
               'groupId': widget.groupId,
               'scheduleId': scheduleId,
-              'scheduledForMillis': scheduledFor.millisecondsSinceEpoch,
+              'scheduledFor': scheduledFor,
             }),
       );
       if (!mounted) return;
@@ -444,170 +455,174 @@ class _GastosViewState extends State<GastosView> {
               return const Center(child: Text('No hay gastos registrados.'));
             }
 
-            return ListView(
+            final scheduleCount = schedules.isEmpty ? 0 : schedules.length + 1;
+            final itemKeys = <String>[
+              if (schedules.isNotEmpty) 'schedules-heading',
+              for (final schedule in schedules) 'schedule/${schedule.id}',
+              if (expenses.isNotEmpty) 'expenses-heading',
+              for (final expense in expenses) 'expense/${expense.id}',
+            ];
+            final itemIndexes = <String, int>{
+              for (var i = 0; i < itemKeys.length; i++) itemKeys[i]: i,
+            };
+            return ListView.builder(
               padding: const EdgeInsets.symmetric(vertical: 8),
-              children: [
-                if (schedules.isNotEmpty) ...[
-                  const Padding(
+              itemCount: itemKeys.length,
+              findChildIndexCallback: (key) =>
+                  key is ValueKey<String> ? itemIndexes[key.value] : null,
+              itemBuilder: (context, index) {
+                final key = ValueKey(itemKeys[index]);
+                if (schedules.isNotEmpty && index == 0) {
+                  return Padding(
+                    key: key,
                     padding: EdgeInsets.fromLTRB(16, 8, 16, 4),
                     child: Text(
                       'Gastos programados',
                       style: TextStyle(fontWeight: FontWeight.bold),
                     ),
-                  ),
-                  ...schedules.map((schedule) {
-                    final data = schedule.data();
-                    final cents = data['cantidadCentimos'] as num?;
-                    final amount = cents != null
-                        ? cents.toDouble() / 100
-                        : (data['cantidad'] as num?)?.toDouble() ?? 0;
-                    final scheduledAt = data['proximaFecha'] as Timestamp?;
-                    final canDelete =
-                        widget.ownerUid == widget.currentUid ||
-                        data['createdByUid'] == widget.currentUid;
-                    final isDeleting = _deletingSchedules.contains(schedule.id);
+                  );
+                }
+                if (index < scheduleCount) {
+                  final schedule = schedules[index - 1];
+                  final data = schedule.data();
+                  final amount = divisionAmountCents(data) / 100;
+                  final scheduledAt = data['proximaFecha'] as String;
+                  final canDelete =
+                      widget.isAdmin ||
+                      data['createdByUid'] == widget.currentUid;
+                  final isDeleting = _deletingSchedules.contains(schedule.id);
 
-                    return Card(
-                      margin: const EdgeInsets.symmetric(
-                        horizontal: 10,
-                        vertical: 5,
-                      ),
-                      child: ListTile(
-                        leading: const Icon(Icons.schedule),
-                        title: Text(data['nombre'] as String? ?? 'Gasto'),
-                        subtitle: Text(
-                          scheduledAt == null
-                              ? 'Fecha pendiente'
-                              : DateFormat(
-                                  'dd/MM/yyyy',
-                                ).format(scheduledAt.toDate()),
-                        ),
-                        trailing: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text('${amount.toStringAsFixed(2)} €'),
-                            if (canDelete)
-                              IconButton(
-                                tooltip: 'Cancelar gasto programado',
-                                onPressed: isDeleting || scheduledAt == null
-                                    ? null
-                                    : () => _confirmAndDeleteSchedule(
-                                        schedule.id,
-                                        scheduledAt,
-                                        data['frecuencia'] != null,
+                  return Card(
+                    key: key,
+                    margin: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 5,
+                    ),
+                    child: ListTile(
+                      leading: const Icon(Icons.schedule),
+                      title: Text(data['nombre'] as String? ?? 'Gasto'),
+                      subtitle: Text(formatCalendarDate(scheduledAt)),
+                      trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text('${amount.toStringAsFixed(2)} €'),
+                          if (canDelete)
+                            IconButton(
+                              tooltip: 'Cancelar gasto programado',
+                              onPressed: isDeleting
+                                  ? null
+                                  : () => _confirmAndDeleteSchedule(
+                                      schedule.id,
+                                      scheduledAt,
+                                      data['frecuencia'] != null,
+                                    ),
+                              icon: isDeleting
+                                  ? const SizedBox.square(
+                                      dimension: 20,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
                                       ),
-                                icon: isDeleting
-                                    ? const SizedBox.square(
-                                        dimension: 20,
-                                        child: CircularProgressIndicator(
-                                          strokeWidth: 2,
-                                        ),
-                                      )
-                                    : const Icon(Icons.delete_outline),
-                              ),
-                          ],
-                        ),
+                                    )
+                                  : const Icon(Icons.delete_outline),
+                            ),
+                        ],
                       ),
-                    );
-                  }),
-                ],
-                if (expenses.isNotEmpty) ...[
-                  const Padding(
+                    ),
+                  );
+                }
+                final expenseIndex = index - scheduleCount;
+                if (expenseIndex == 0) {
+                  return Padding(
+                    key: key,
                     padding: EdgeInsets.fromLTRB(16, 12, 16, 4),
                     child: Text(
                       'Gastos registrados',
                       style: TextStyle(fontWeight: FontWeight.bold),
                     ),
-                  ),
-                  ...expenses.map((expense) {
-                    final data = expense.data();
-                    final payerId = data['pagadoPor'] as String? ?? '';
-                    final cents = data['cantidadCentimos'] as num?;
-                    final amount = cents != null
-                        ? cents.toDouble() / 100
-                        : (data['cantidad'] as num?)?.toDouble() ?? 0;
-                    final date = (data['fecha'] as Timestamp).toDate();
-                    final isMyGasto = widget.myMemberIds.contains(payerId);
-                    final canDelete =
-                        widget.ownerUid == widget.currentUid ||
-                        data['createdByUid'] == widget.currentUid;
+                  );
+                }
+                final expense = expenses[expenseIndex - 1];
+                final data = expense.data();
+                final payerId = data['pagadoPor'] as String? ?? '';
+                final amount = divisionAmountCents(data) / 100;
+                final date = data['fecha'] as String;
+                final isMyGasto = widget.myMemberIds.contains(payerId);
+                final canDelete =
+                    widget.isAdmin || data['createdByUid'] == widget.currentUid;
 
-                    return Card(
-                      margin: const EdgeInsets.symmetric(
-                        horizontal: 10,
-                        vertical: 5,
-                      ),
-                      color: isMyGasto
-                          ? const Color.fromARGB(255, 192, 192, 192)
-                          : null, // color distinto si es tu gasto
-                      child: Padding(
-                        padding: const EdgeInsets.all(12.0),
-                        child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
+                return Card(
+                  key: key,
+                  margin: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 5,
+                  ),
+                  color: isMyGasto
+                      ? const Color.fromARGB(255, 192, 192, 192)
+                      : null, // color distinto si es tu gasto
+                  child: Padding(
+                    padding: const EdgeInsets.all(12.0),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        // Parte izquierda (nombre, descripción, fecha)
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                data['nombre'] as String? ?? 'Gasto',
+                                style: TextStyle(
+                                  fontWeight: isMyGasto
+                                      ? FontWeight.bold
+                                      : FontWeight.normal,
+                                  color: isMyGasto ? Colors.green[800] : null,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(data['descripcion'] as String? ?? ''),
+                              const SizedBox(height: 4),
+                              Text(
+                                formatCalendarDate(date),
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.grey,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        // Parte derecha (cantidad + botón)
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.end,
                           children: [
-                            // Parte izquierda (nombre, descripción, fecha)
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    data['nombre'] as String? ?? 'Gasto',
-                                    style: TextStyle(
-                                      fontWeight: isMyGasto
-                                          ? FontWeight.bold
-                                          : FontWeight.normal,
-                                      color: isMyGasto
-                                          ? Colors.green[800]
-                                          : null,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 4),
-                                  Text(data['descripcion'] as String? ?? ''),
-                                  const SizedBox(height: 4),
-                                  Text(
-                                    DateFormat('dd/MM/yyyy').format(date),
-                                    style: const TextStyle(
-                                      fontSize: 12,
-                                      color: Colors.grey,
-                                    ),
-                                  ),
-                                ],
+                            Text(
+                              '${amount.toStringAsFixed(2)} €',
+                              style: TextStyle(
+                                fontWeight: isMyGasto
+                                    ? FontWeight.bold
+                                    : FontWeight.normal,
+                                color: isMyGasto ? Colors.green[800] : null,
                               ),
                             ),
-                            // Parte derecha (cantidad + botón)
-                            Column(
-                              crossAxisAlignment: CrossAxisAlignment.end,
-                              children: [
-                                Text(
-                                  '${amount.toStringAsFixed(2)} €',
-                                  style: TextStyle(
-                                    fontWeight: isMyGasto
-                                        ? FontWeight.bold
-                                        : FontWeight.normal,
-                                    color: isMyGasto ? Colors.green[800] : null,
-                                  ),
+                            Text(widget.memberMap[payerId]?['name'] ?? ''),
+                            if (canDelete)
+                              IconButton(
+                                icon: const Icon(
+                                  Icons.delete,
+                                  color: Colors.red,
                                 ),
-                                Text(widget.memberMap[payerId]?['name'] ?? ''),
-                                if (canDelete)
-                                  IconButton(
-                                    icon: const Icon(
-                                      Icons.delete,
-                                      color: Colors.red,
-                                    ),
-                                    onPressed: () => _confirmAndDelete(
-                                      expense.id,
-                                      data['scheduleId'] as String?,
-                                    ),
-                                  ),
-                              ],
-                            ),
+                                onPressed: () => _confirmAndDelete(
+                                  expense.id,
+                                  data['scheduleId'] as String?,
+                                ),
+                              ),
                           ],
                         ),
-                      ),
-                    );
-                  }),
-                ],
-              ],
+                      ],
+                    ),
+                  ),
+                );
+              },
             );
           },
         );
@@ -636,6 +651,7 @@ enum _BalanceMode { debts, net }
 
 class _SaldosViewState extends State<SaldosView> {
   late final Stream<QuerySnapshot<Map<String, dynamic>>> _divisionesStream;
+  final _payments = DebtPayments();
   _BalanceMode _balanceMode = _BalanceMode.debts;
   bool _selectionChanged = false;
 
@@ -697,13 +713,7 @@ class _SaldosViewState extends State<SaldosView> {
     if (currentMemberId == null) return;
 
     try {
-      await IdentityMutationTracker.shared.track(
-        () => division.reference.update({
-          'pagado': true,
-          'pagadoEn': FieldValue.serverTimestamp(),
-          'pagoRegistradoPor': currentMemberId,
-        }),
-      );
+      await _payments.markPaid(division.reference, currentMemberId);
     } catch (_) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -712,55 +722,20 @@ class _SaldosViewState extends State<SaldosView> {
     }
   }
 
-  Future<void> _confirmarReapertura(
-    QueryDocumentSnapshot<Map<String, dynamic>> division,
-  ) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Marcar pago como pendiente'),
-        content: const Text(
-          'El deudor volverá a recibir este pago como pendiente.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancelar'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Marcar pendiente'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true) return;
-
-    try {
-      await IdentityMutationTracker.shared.track(
-        () => division.reference.update({
-          'pagado': false,
-          'pagadoEn': FieldValue.delete(),
-          'pagoRegistradoPor': FieldValue.delete(),
-        }),
-      );
-    } catch (_) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No se pudo reabrir el pago')),
-      );
-    }
-  }
-
   Future<void> _confirmarCobro(
     QueryDocumentSnapshot<Map<String, dynamic>> division,
   ) async {
+    final data = division.data();
+    final dateLabel = formatCalendarDate(data['fecha'] as String);
+    final name = widget.memberMap[data['memberId']]?['name'] ?? 'Miembro';
+    final expense = data['nombre'] as String? ?? 'Gasto';
+    final amount = _amount(data).toStringAsFixed(2);
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Registrar deuda como cobrada'),
-        content: const Text(
-          'La deuda dejará de aparecer como pendiente para este miembro.',
+        content: Text(
+          '$expense ($dateLabel): se registrará el cobro de $amount € de $name.',
         ),
         actions: [
           TextButton(
@@ -774,7 +749,7 @@ class _SaldosViewState extends State<SaldosView> {
         ],
       ),
     );
-    if (confirmed == true) await _marcarPagado(division);
+    if (confirmed == true && mounted) await _marcarPagado(division);
   }
 
   @override
@@ -795,21 +770,12 @@ class _SaldosViewState extends State<SaldosView> {
           return data['pagado'] != true &&
               data['memberId'] != data['pagadoPor'];
         }).toList();
-        final pagosRecibidos = divisiones.where((division) {
-          final data = division.data();
-          return data['pagado'] == true &&
-              widget.myMemberIds.contains(data['pagadoPor']) &&
-              !widget.myMemberIds.contains(data['memberId']) &&
-              data['pagoRegistradoPor'] == data['memberId'];
-        }).toList();
-
         final balances = GroupBalances(divisiones.map((d) => d.data()));
         final showNet = _balanceMode == _BalanceMode.net;
 
         return ListView.builder(
           padding: const EdgeInsets.all(16),
-          itemCount:
-              1 + widget.memberMap.length + (pagosRecibidos.isEmpty ? 0 : 1),
+          itemCount: 1 + widget.memberMap.length,
           itemBuilder: (context, i) {
             if (i == 0) {
               return Padding(
@@ -830,7 +796,7 @@ class _SaldosViewState extends State<SaldosView> {
                       selected: {_balanceMode},
                       onSelectionChanged: _selectBalanceMode,
                     ),
-                    if (pendientes.isEmpty && pagosRecibidos.isEmpty)
+                    if (pendientes.isEmpty)
                       const Padding(
                         padding: EdgeInsets.only(top: 16),
                         child: Text('No tienes deudas pendientes.'),
@@ -840,47 +806,6 @@ class _SaldosViewState extends State<SaldosView> {
               );
             }
             i -= 1;
-            if (i == widget.memberMap.length) {
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Padding(
-                    padding: EdgeInsets.only(top: 20, bottom: 8),
-                    child: Text(
-                      'Pagos que te han marcado',
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ),
-                  ...pagosRecibidos.map((division) {
-                    final data = division.data();
-                    final memberId = data['memberId'] as String;
-                    final memberName =
-                        widget.memberMap[memberId]?['name'] ?? 'Miembro';
-                    final amount = _amount(data);
-                    final expenseName = data['nombre'] as String? ?? 'Gasto';
-
-                    return Card(
-                      margin: const EdgeInsets.symmetric(vertical: 6),
-                      child: ListTile(
-                        title: Text(expenseName),
-                        subtitle: Text(
-                          '$memberName ha indicado que pagó ${amount.toStringAsFixed(2)} €',
-                        ),
-                        trailing: IconButton(
-                          tooltip: 'Volver a marcar como pendiente',
-                          icon: const Icon(Icons.undo),
-                          onPressed: () => _confirmarReapertura(division),
-                        ),
-                      ),
-                    );
-                  }),
-                ],
-              );
-            }
-
             final memberIds = widget.memberMap.keys.toList();
             final memberId = memberIds[i];
             final name = widget.memberMap[memberId]?['name'] ?? 'Sin nombre';
@@ -931,10 +856,7 @@ class _SaldosViewState extends State<SaldosView> {
                     final pagadoPor = data['pagadoPor'] ?? '';
                     final nombrePagador =
                         widget.memberMap[pagadoPor]?['name'] ?? 'Otro';
-                    final timestamp = data['fecha'] as Timestamp?;
-                    final fecha = timestamp != null
-                        ? DateFormat('dd/MM/yyyy').format(timestamp.toDate())
-                        : 'Sin fecha';
+                    final fecha = formatCalendarDate(data['fecha'] as String);
 
                     return Card(
                       margin: const EdgeInsets.symmetric(vertical: 6),
@@ -976,13 +898,16 @@ class _SaldosViewState extends State<SaldosView> {
                     final data = division.data();
                     final amount = _amount(data);
                     final expenseName = data['nombre'] as String? ?? 'Gasto';
+                    final dateLabel = formatCalendarDate(
+                      data['fecha'] as String,
+                    );
 
                     return Card(
                       margin: const EdgeInsets.symmetric(vertical: 6),
                       child: ListTile(
                         title: Text(expenseName),
                         subtitle: Text(
-                          '$name te debe ${amount.toStringAsFixed(2)} €',
+                          '$name te debe ${amount.toStringAsFixed(2)} €\nGasto: $dateLabel',
                         ),
                         trailing: IconButton(
                           tooltip: 'Registrar como cobrado',
@@ -1028,7 +953,7 @@ class EstadisticasView extends StatelessWidget {
               final data = doc.data();
               return _GastoEntry(
                 data['nombre'] as String? ?? 'Gasto',
-                (data['cantidad'] as num?)?.toDouble() ?? 0,
+                divisionAmountCents(data) / 100,
               );
             })
             .where((entry) => entry.importe > 0)

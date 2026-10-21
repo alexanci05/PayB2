@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:payb2/screens/home/main_screen.dart';
@@ -19,6 +20,7 @@ class CrearGrupoScreenState extends State<CrearGrupoScreen> {
   final TextEditingController _nombreController = TextEditingController();
   final List<TextEditingController> _miembrosControllers = [];
   bool _isSubmitting = false;
+  String? _timeZone;
   String? _requestPayload;
   String? _requestId;
 
@@ -73,18 +75,20 @@ class CrearGrupoScreenState extends State<CrearGrupoScreen> {
       return;
     }
 
-    final payload = <String, dynamic>{
-      'nombre': nombre,
-      'miembros': memberNames,
-    };
-    final encodedPayload = jsonEncode(payload);
-    if (_requestPayload != encodedPayload) {
-      _requestPayload = encodedPayload;
-      _requestId = FirebaseFirestore.instance.collection('groups').doc().id;
-    }
-
     setState(() => _isSubmitting = true);
     try {
+      _timeZone ??= (await FlutterTimezone.getLocalTimezone()).identifier;
+      final payload = <String, dynamic>{
+        'timeZone': _timeZone,
+        'nombre': nombre,
+        'miembros': memberNames,
+      };
+      final encodedPayload = jsonEncode(payload);
+      if (_requestPayload != encodedPayload) {
+        _requestPayload = encodedPayload;
+        _requestId = FirebaseFirestore.instance.collection('groups').doc().id;
+      }
+
       final callable = FirebaseFunctions.instance.httpsCallable('crearGrupo');
       await IdentityMutationTracker.shared.track(
         () => callable.callObserved<Map<String, dynamic>>({

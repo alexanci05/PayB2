@@ -4,19 +4,21 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:intl/intl.dart';
+import 'package:payb2/domain/calendar_date.dart';
 import 'package:payb2/domain/expense_split.dart';
 import 'package:payb2/services/auth/identity_mutation_tracker.dart';
 import 'package:payb2/services/network/connection_status.dart';
 
 class CrearGastoScreen extends StatefulWidget {
   final String groupId;
-  final String currentMemberId;
+  final String? initialPayerId;
+  final FirebaseFirestore? firestore;
 
   const CrearGastoScreen({
     super.key,
     required this.groupId,
-    required this.currentMemberId,
+    this.initialPayerId,
+    this.firestore,
   });
 
   @override
@@ -28,8 +30,10 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
   final _nombreGastoController = TextEditingController();
   final _cantidadController = TextEditingController();
   final _descripcionController = TextEditingController();
+  final _dateController = TextEditingController();
 
   DateTime? _selectedDate;
+  String? _payerId;
   List<Map<String, dynamic>> _usuarios = [];
   Set<String> _selectedParticipants = {};
   bool _selectAll = false;
@@ -38,9 +42,10 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
   bool _isSubmitting = false;
   String? _requestPayload;
   String? _requestId;
-  late final int _timeZoneOffsetMinutes;
   bool _isLoadingUsers = true;
   String? _loadUsersError;
+  FirebaseFirestore get _firestore =>
+      widget.firestore ?? FirebaseFirestore.instance;
 
   static const _frecuencias = [
     'Cada 7 días',
@@ -55,8 +60,7 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
   @override
   void initState() {
     super.initState();
-    _selectedDate = DateTime.now();
-    _timeZoneOffsetMinutes = DateTime.now().timeZoneOffset.inMinutes;
+    _payerId = widget.initialPayerId;
     _cargarUsuarios();
   }
 
@@ -68,13 +72,20 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
       });
     }
     try {
-      final snapshot = await FirebaseFirestore.instance
+      final group = await _firestore
+          .collection('groups')
+          .doc(widget.groupId)
+          .get();
+      final today = todayInTimeZone(group.data()!['timeZone'] as String);
+      final snapshot = await _firestore
           .collection('groups')
           .doc(widget.groupId)
           .collection('members')
           .get();
       if (!mounted) return;
       setState(() {
+        _selectedDate ??= today;
+        _dateController.text = calendarDateString(_selectedDate!);
         _usuarios = snapshot.docs
             .map(
               (doc) => {
@@ -83,6 +94,10 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
               },
             )
             .toList();
+        final ids = _usuarios.map((user) => user['id'] as String).toSet();
+        if (!ids.contains(_payerId)) _payerId = null;
+        _selectedParticipants.retainAll(ids);
+        _selectedParticipants.remove(_payerId);
         _isLoadingUsers = false;
         _syncSelectAll();
       });
@@ -90,7 +105,8 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
       if (!mounted) return;
       setState(() {
         _isLoadingUsers = false;
-        _loadUsersError = 'No se pudieron cargar los miembros';
+        _loadUsersError =
+            'No se pudieron cargar los miembros o la zona horaria del grupo';
       });
     }
   }
@@ -101,7 +117,7 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
       if (_selectAll) {
         _selectedParticipants = _usuarios
             .map((user) => user['id'] as String)
-            .where((id) => id != widget.currentMemberId)
+            .where((id) => id != _payerId)
             .toSet();
       } else {
         _selectedParticipants.clear();
@@ -120,10 +136,25 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
     });
   }
 
+  void _onPayerChanged(String? id) {
+    setState(() {
+      final selectedAll = _selectAll;
+      _payerId = id;
+      _selectedParticipants.remove(id);
+      if (selectedAll) {
+        _selectedParticipants = _usuarios
+            .map((user) => user['id'] as String)
+            .where((memberId) => memberId != id)
+            .toSet();
+      }
+      _syncSelectAll();
+    });
+  }
+
   void _syncSelectAll() {
     final eligibleIds = _usuarios
         .map((user) => user['id'] as String)
-        .where((id) => id != widget.currentMemberId)
+        .where((id) => id != _payerId)
         .toList();
     _selectAll =
         eligibleIds.isNotEmpty &&
@@ -135,18 +166,24 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
     _nombreGastoController.dispose();
     _cantidadController.dispose();
     _descripcionController.dispose();
+    _dateController.dispose();
     super.dispose();
   }
 
   Future<void> _onSubmit() async {
-    if (_isSubmitting) return;
+    if (_isSubmitting || _isLoadingUsers || _loadUsersError != null) return;
     if (!_formKey.currentState!.validate()) return;
 
     final nombre = _nombreGastoController.text.trim();
     final cantidadCentimos = parseAmountCents(_cantidadController.text);
     final descripcion = _descripcionController.text.trim();
-    final selectedDate = _selectedDate ?? DateTime.now();
-    final pagadoPor = widget.currentMemberId;
+    final selectedDate = _selectedDate!;
+    final pagadoPor = _payerId;
+
+    if (pagadoPor == null) {
+      _showError('Selecciona quién pagó el gasto');
+      return;
+    }
 
     if (cantidadCentimos == null || cantidadCentimos <= 0) {
       _showError('Cantidad inválida');
@@ -171,16 +208,15 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
       'nombre': nombre,
       'descripcion': descripcion,
       'cantidadCentimos': cantidadCentimos,
-      'fecha': DateFormat('yyyy-MM-dd').format(selectedDate),
+      'fecha': calendarDateString(selectedDate),
       'pagadoPor': pagadoPor,
       'participantes': participantes,
       'frecuencia': _esPeriodico ? _frecuenciaSeleccionada : null,
-      'timeZoneOffsetMinutes': _timeZoneOffsetMinutes,
     };
     final encodedPayload = jsonEncode(payload);
     if (_requestPayload != encodedPayload) {
       _requestPayload = encodedPayload;
-      _requestId = FirebaseFirestore.instance.collection('groups').doc().id;
+      _requestId = _firestore.collection('groups').doc().id;
     }
 
     setState(() => _isSubmitting = true);
@@ -207,15 +243,6 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(SnackBar(content: Text(message)));
-  }
-
-  String get _currentMemberName {
-    for (final user in _usuarios) {
-      if (user['id'] == widget.currentMemberId) {
-        return user['nombre'] as String;
-      }
-    }
-    return 'Tu identidad del grupo';
   }
 
   @override
@@ -285,13 +312,7 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
                         const SizedBox(height: 20),
                         TextFormField(
                           readOnly: true,
-                          controller: TextEditingController(
-                            text: _selectedDate == null
-                                ? ''
-                                : DateFormat(
-                                    'yyyy-MM-dd',
-                                  ).format(_selectedDate!),
-                          ),
+                          controller: _dateController,
                           decoration: const InputDecoration(
                             labelText: 'Fecha del gasto',
                             border: OutlineInputBorder(),
@@ -300,12 +321,17 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
                           onTap: () async {
                             final pickedDate = await showDatePicker(
                               context: context,
-                              initialDate: _selectedDate ?? DateTime.now(),
+                              initialDate: _selectedDate!,
                               firstDate: DateTime(2000),
                               lastDate: DateTime(2100),
                             );
-                            if (pickedDate != null) {
-                              setState(() => _selectedDate = pickedDate);
+                            if (pickedDate != null && mounted) {
+                              setState(() {
+                                _selectedDate = pickedDate;
+                                _dateController.text = calendarDateString(
+                                  pickedDate,
+                                );
+                              });
                             }
                           },
                         ),
@@ -324,6 +350,7 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
                         ),
                         if (_esPeriodico)
                           DropdownButtonFormField<String>(
+                            isExpanded: true,
                             value: _frecuenciaSeleccionada,
                             decoration: const InputDecoration(
                               labelText: 'Frecuencia',
@@ -354,12 +381,30 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
                           ),
                         ),
                         const SizedBox(height: 16),
-                        InputDecorator(
+                        DropdownButtonFormField<String>(
+                          key: const ValueKey('expense-payer'),
+                          value: _payerId,
+                          isExpanded: true,
                           decoration: const InputDecoration(
                             labelText: 'Pagado por',
                             border: OutlineInputBorder(),
                           ),
-                          child: Text(_currentMemberName),
+                          items: _usuarios
+                              .map(
+                                (user) => DropdownMenuItem<String>(
+                                  value: user['id'] as String,
+                                  child: Text(
+                                    user['nombre'] as String,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                              )
+                              .toList(),
+                          onChanged: _isSubmitting ? null : _onPayerChanged,
+                          validator: (value) => value == null
+                              ? 'Selecciona quién pagó el gasto'
+                              : null,
                         ),
                         const SizedBox(height: 20),
                         const Align(
@@ -372,9 +417,7 @@ class CrearGastoScreenState extends State<CrearGastoScreen> {
                           onChanged: _onToggleSelectAll,
                         ),
                         ..._usuarios
-                            .where(
-                              (user) => user['id'] != widget.currentMemberId,
-                            )
+                            .where((user) => user['id'] != _payerId)
                             .map((user) {
                               final id = user['id'] as String;
                               return CheckboxListTile(

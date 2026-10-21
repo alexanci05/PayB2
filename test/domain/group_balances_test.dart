@@ -4,13 +4,8 @@ import 'package:payb2/domain/group_balances.dart';
 void main() {
   test('group debts and net use cents and exclude paid and self divisions', () {
     final balances = GroupBalances([
-      {
-        'memberId': 'a',
-        'pagadoPor': 'b',
-        'cantidadCentimos': 1001,
-        'cantidad': 99,
-      },
-      {'memberId': 'b', 'pagadoPor': 'a', 'cantidad': 2.345},
+      {'memberId': 'a', 'pagadoPor': 'b', 'cantidadCentimos': 1001},
+      {'memberId': 'b', 'pagadoPor': 'a', 'cantidadCentimos': 235},
       {'memberId': 'c', 'pagadoPor': 'a', 'cantidadCentimos': 100},
       {'memberId': 'a', 'pagadoPor': 'a', 'cantidadCentimos': 500},
       {
@@ -26,5 +21,13 @@ void main() {
     expect(balances.net.values.reduce((a, b) => a + b), 0);
     expect(GroupBalances([]).debts, isEmpty);
     expect(GroupBalances([]).net, isEmpty);
+    expect(
+      () => divisionAmountCents({'cantidad': 2.35}),
+      throwsA(isA<TypeError>()),
+    );
+    expect(
+      () => divisionAmountCents({'cantidadCentimos': 235.5}),
+      throwsA(isA<TypeError>()),
+    );
   });
 }

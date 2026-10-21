@@ -36,41 +36,31 @@ async function finishEventDelivery(db, ref, reservation, sent) {
   });
 }
 
-async function removeInvalidToken(db, ref, token, legacy) {
+async function removeInvalidToken(db, ref, token) {
   await db.runTransaction(async (transaction) => {
     const snapshot = await transaction.get(ref);
     if (snapshot.get('fcmToken') !== token) return;
-    if (legacy) {
-      transaction.update(ref, { fcmToken: FieldValue.delete() });
-    } else {
-      transaction.delete(ref);
-    }
+    transaction.delete(ref);
   });
 }
 
 async function sendNotificationToUser({ db, messaging, uid, title, body, period, eventId }) {
   const userRef = db.collection('usuarios').doc(uid);
-  const [user, devices] = await Promise.all([
-    userRef.get(), userRef.collection('devices').get(),
-  ]);
+  const devices = await userRef.collection('devices').get();
   const destinations = devices.docs.map((device) => ({
-    ref: device.ref, id: device.id, token: device.get('fcmToken'), legacy: false,
+    ref: device.ref, id: device.id, token: device.get('fcmToken'),
   }));
-  // Older installations keep working until their next token registration.
-  if (user.get('fcmToken')) {
-    destinations.push({ ref: userRef, id: 'legacy', token: user.get('fcmToken'), legacy: true });
-  }
 
   const seenTokens = new Set();
   const failures = [];
   for (const destination of destinations) {
-    const { ref, id, token, legacy } = destination;
+    const { ref, id, token } = destination;
     if (typeof token !== 'string' || !token || seenTokens.has(token)) continue;
     seenTokens.add(token);
-    const deliveryId = legacy ? uid : createHash('sha256').update(JSON.stringify([uid, id])).digest('hex');
+    const deliveryId = createHash('sha256').update(JSON.stringify([uid, id])).digest('hex');
     const deliveryRef = db.collection('reminderDeliveries').doc(deliveryId);
     const eventRef = eventId ? db.collection('eventNotificationDeliveries').doc(
-      createHash('sha256').update(JSON.stringify([eventId, uid, legacy, id])).digest('hex'),
+      createHash('sha256').update(JSON.stringify([eventId, uid, id])).digest('hex'),
     ) : null;
     const reservation = eventRef ? randomUUID() : null;
     let reserved = false;
@@ -100,7 +90,7 @@ async function sendNotificationToUser({ db, messaging, uid, title, body, period,
       }
       if (error?.code === 'messaging/registration-token-not-registered' ||
           error?.code === 'messaging/invalid-registration-token') {
-        await removeInvalidToken(db, ref, token, legacy).catch((cleanupError) => {
+        await removeInvalidToken(db, ref, token).catch((cleanupError) => {
           failures.push(cleanupError);
         });
       } else {

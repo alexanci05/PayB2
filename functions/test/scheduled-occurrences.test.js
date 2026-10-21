@@ -2,102 +2,74 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-
 const {
-  centsFromAmount,
-  splitCents,
-  nextScheduledDate,
-  scheduledOccurrenceId,
-  divisionId,
+  centsFromAmount, splitCents, parseCalendarDate, validateTimeZone,
+  todayInZone, scheduleInstant, nextScheduledDate, scheduledOccurrenceId, divisionId,
 } = require('../lib/scheduled-occurrences');
 
-test('centsFromAmount prefers exact cent values and converts legacy decimal amounts', () => {
-  assert.equal(centsFromAmount(1001, 10.00), 1001);
-  assert.equal(centsFromAmount(undefined, 10.01), 1001);
-  assert.throws(() => centsFromAmount(10.5, 10.50), /safe integer/);
+test('money accepts only positive integer cents', () => {
+  assert.equal(centsFromAmount(1001), 1001);
+  for (const amount of [undefined, 10.01, -1, 0]) {
+    assert.throws(() => centsFromAmount(amount), /safe integer/);
+  }
 });
 
-test('splitCents includes the payer, sorts ids, and gives remainder cents to first ids', () => {
-  const shares = splitCents(1001, 'payer', ['zoe', 'amy', 'payer']);
-
-  assert.deepEqual(shares, [
-    { memberId: 'amy', cantidadCentimos: 334, cantidad: 3.34 },
-    { memberId: 'payer', cantidadCentimos: 334, cantidad: 3.34 },
-    { memberId: 'zoe', cantidadCentimos: 333, cantidad: 3.33 },
+test('splitCents includes the payer and distributes every cent deterministically', () => {
+  assert.deepEqual(splitCents(1001, 'payer', ['zoe', 'amy', 'payer']), [
+    { memberId: 'amy', cantidadCentimos: 334 },
+    { memberId: 'payer', cantidadCentimos: 334 },
+    { memberId: 'zoe', cantidadCentimos: 333 },
   ]);
-  assert.equal(shares.reduce((total, share) => total + share.cantidadCentimos, 0), 1001);
-});
-
-test('splitCents requires a positive amount and a debtor besides the payer', () => {
   assert.throws(() => splitCents(0, 'payer', ['debtor']), /positive/);
   assert.throws(() => splitCents(100, 'payer', ['payer']), /participant/);
   assert.throws(() => splitCents(2, 'payer', ['a', 'b']), /one cent/);
 });
 
-test('calendar frequencies clamp end-of-month and leap-day occurrences', () => {
-  assert.equal(
-    nextScheduledDate(new Date('2023-01-31T09:30:00.000Z'), 'Mensual (mismo día todos los meses)').toISOString(),
-    '2023-02-28T09:30:00.000Z',
-  );
-  assert.equal(
-    nextScheduledDate(new Date('2024-01-31T09:30:00.000Z'), 'Mensual (mismo día todos los meses)').toISOString(),
-    '2024-02-29T09:30:00.000Z',
-  );
-  assert.equal(
-    nextScheduledDate(new Date('2024-02-29T09:30:00.000Z'), 'Anual (mismo día cada año)').toISOString(),
-    '2025-02-28T09:30:00.000Z',
-  );
-});
-
-test('monthly occurrences recover the anchored day after short months', () => {
-  const frequency = 'Mensual (mismo día todos los meses)';
-  for (const [year, februaryDay] of [[2023, 28], [2024, 29]]) {
-    let date = new Date(`${year}-01-31T09:30:00.000Z`);
-    for (const expected of [
-      `${year}-02-${februaryDay}T09:30:00.000Z`,
-      `${year}-03-31T09:30:00.000Z`,
-      `${year}-04-30T09:30:00.000Z`,
-    ]) {
-      date = nextScheduledDate(date, frequency, 31);
-      assert.equal(date.toISOString(), expected);
-    }
+test('calendar dates and IANA zones reject ambiguous or invalid values', () => {
+  for (const date of ['2026-02-30', '2026-1-01', '2026-01-01T12:00Z', new Date()]) {
+    assert.throws(() => parseCalendarDate(date));
   }
+  assert.equal(parseCalendarDate('2024-02-29').day, 29);
+  assert.equal(validateTimeZone('Pacific/Auckland'), 'Pacific/Auckland');
+  assert.throws(() => validateTimeZone('UTC+3'));
+  assert.throws(() => validateTimeZone(undefined));
 });
 
-test('quarterly occurrences recover the anchored day after a 30-day month', () => {
-  let date = new Date('2024-03-31T09:30:00.000Z');
-  for (const expected of [
-    '2024-06-30T09:30:00.000Z',
-    '2024-09-30T09:30:00.000Z',
-    '2024-12-31T09:30:00.000Z',
-  ]) {
+test('group dates do not depend on the execution host or the viewing device', () => {
+  const instant = Date.parse('2026-10-16T12:00:00Z');
+  assert.equal(todayInZone('Europe/Madrid', instant), '2026-10-16');
+  assert.equal(todayInZone('Pacific/Auckland', instant), '2026-10-17');
+  assert.equal(scheduleInstant('2026-10-17', 'Pacific/Auckland').toISOString(), '2026-10-16T11:00:00.000Z');
+  assert.equal(scheduledOccurrenceId('schedule', '2026-10-17'), 'schedule_2026-10-17');
+});
+
+test('midnight execution follows DST without shifting the occurrence date', () => {
+  assert.equal(scheduleInstant('2026-03-29', 'Europe/Madrid').toISOString(), '2026-03-28T23:00:00.000Z');
+  assert.equal(scheduleInstant('2026-03-30', 'Europe/Madrid').toISOString(), '2026-03-29T22:00:00.000Z');
+  assert.equal(scheduleInstant('2026-10-25', 'Europe/Madrid').toISOString(), '2026-10-24T22:00:00.000Z');
+  assert.equal(scheduleInstant('2026-10-26', 'Europe/Madrid').toISOString(), '2026-10-25T23:00:00.000Z');
+});
+
+test('monthly and quarterly dates recover their original anchor', () => {
+  let date = '2024-01-31';
+  for (const expected of ['2024-02-29', '2024-03-31', '2024-04-30']) {
+    date = nextScheduledDate(date, 'Mensual (mismo día todos los meses)', 31);
+    assert.equal(date, expected);
+  }
+  date = '2024-03-31';
+  for (const expected of ['2024-06-30', '2024-09-30', '2024-12-31']) {
     date = nextScheduledDate(date, 'Trimestral (mismo día cada 3 meses)', 31);
-    assert.equal(date.toISOString(), expected);
+    assert.equal(date, expected);
   }
 });
 
-test('annual leap-day occurrences recover February 29 in the next leap year', () => {
-  let date = new Date('2024-02-29T09:30:00.000Z');
+test('annual leap-day dates recover February 29 and fixed-day periods stay calendar based', () => {
+  let date = '2024-02-29';
   for (const year of [2025, 2026, 2027, 2028]) {
     date = nextScheduledDate(date, 'Anual (mismo día cada año)', 29);
-    assert.equal(date.toISOString(), `${year}-02-${year === 2028 ? 29 : 28}T09:30:00.000Z`);
+    assert.equal(date, `${year}-02-${year === 2028 ? 29 : 28}`);
   }
-});
-
-test('fixed-day frequencies ignore a calendar anchor', () => {
-  const date = new Date('2024-01-31T09:30:00.000Z');
-  assert.equal(
-    nextScheduledDate(date, 'Cada 30 días', 31).toISOString(),
-    nextScheduledDate(date, 'Cada 30 días').toISOString(),
-  );
-});
-
-test('scheduled occurrence and division ids are deterministic', () => {
-  assert.equal(scheduledOccurrenceId('schedule-123', new Date('2026-09-17T15:00:00.000Z')), 'schedule-123_1789657200000000');
-  assert.equal(scheduledOccurrenceId('schedule-123', 1789657200000), 'schedule-123_1789657200000000');
-  assert.equal(
-    scheduledOccurrenceId('schedule-123', { seconds: 1789657200, nanoseconds: 123456 }),
-    'schedule-123_1789657200000123',
-  );
-  assert.equal(divisionId('member-123'), 'member-123');
+  assert.equal(nextScheduledDate('2026-03-28', 'Cada 7 días'), '2026-04-04');
+  assert.equal(nextScheduledDate('2024-01-31', 'Cada 30 días', 31), '2024-03-01');
+  assert.equal(divisionId('member'), 'member');
 });

@@ -24,14 +24,19 @@ service cloud.firestore {
         get(/databases/$(database)/documents/groups/$(groupId)).data.ownerDeviceId == request.auth.uid;
     }
 
+    function isGroupAdmin(groupId) {
+      return isGroupOwner(groupId) ||
+        (isGroupMember(groupId) &&
+          get(/databases/$(database)/documents/groups/$(groupId)).data.get('allMembersAreAdmins', false) == true);
+    }
+
     function ownsMemberIdentity(groupId, memberId) {
       return isGroupMember(groupId) &&
         get(/databases/$(database)/documents/groups/$(groupId)/members/$(memberId)).data.reclamadoPor == request.auth.uid;
     }
 
     match /usuarios/{uid} {
-      allow read: if signedIn() && request.auth.uid == uid;
-      allow create, update, delete: if accountCanMutate() && request.auth.uid == uid;
+      allow read, write: if false;
 
       match /devices/{installationId} {
         allow read: if signedIn() && request.auth.uid == uid;
@@ -58,7 +63,7 @@ service cloud.firestore {
     match /groups/{groupId} {
       allow create: if false;
       allow read: if isGroupMember(groupId) || isGroupOwner(groupId);
-      allow update: if accountCanMutate() && isGroupOwner(groupId) &&
+      allow update: if accountCanMutate() && isGroupAdmin(groupId) &&
         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name']) &&
         request.resource.data.name is string &&
         request.resource.data.name.size() > 0 &&

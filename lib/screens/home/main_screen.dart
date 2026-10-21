@@ -4,9 +4,10 @@ import 'package:flutter_speed_dial/flutter_speed_dial.dart'; // Biblioteca para 
 import 'package:payb2/screens/grupo_detalles/grupo_detalle_screen.dart';
 import 'package:payb2/screens/settings/settings_screen.dart';
 import 'package:payb2/services/auth/identity_mutation_tracker.dart';
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:intl/intl.dart';
+import 'package:payb2/domain/calendar_date.dart';
+import 'package:payb2/domain/group_balances.dart';
 import 'package:payb2/services/debts/wallet_debts.dart';
+import 'package:payb2/services/groups/groups_list.dart';
 
 // Pantalla principal cuando se pertenece a un grupo
 
@@ -97,115 +98,89 @@ class GroupsScreen extends StatefulWidget {
 }
 
 class _GroupsScreenState extends State<GroupsScreen> {
-  String? deviceId;
-  late Future<List<DocumentSnapshot>> futureGroups;
-  bool _isLoading = true;
-  String? _loadError;
+  late final GroupsList _groups;
 
   @override
   void initState() {
     super.initState();
-    loadGroups();
+    _groups = GroupsList()..addListener(_onGroupsChanged);
   }
 
-  Future<void> loadGroups() async {
-    if (mounted) {
-      setState(() {
-        _isLoading = true;
-        _loadError = null;
-      });
-    }
-    try {
-      final id = await getUid();
-      final memberQuery = await FirebaseFirestore.instance
-          .collection('groupMembers')
-          .where('deviceId', isEqualTo: id)
-          .get();
-      final groupIds = memberQuery.docs.map((doc) => doc['groupId']).toList();
-      if (!mounted) return;
-      setState(() {
-        deviceId = id;
-        futureGroups = _loadGroupDocs(groupIds);
-        _isLoading = false;
-      });
-    } catch (_) {
-      if (!mounted) return;
-      setState(() {
-        _isLoading = false;
-        _loadError = 'No se pudieron cargar los grupos';
-      });
-    }
+  void _onGroupsChanged() {
+    if (mounted) setState(() {});
   }
 
-  Future<List<DocumentSnapshot>> _loadGroupDocs(List groupIds) async {
-    if (groupIds.isEmpty) return [];
-    final futures = groupIds.map((id) {
-      return FirebaseFirestore.instance.collection('groups').doc(id).get();
-    });
-    return await Future.wait(futures);
+  @override
+  void dispose() {
+    _groups.removeListener(_onGroupsChanged);
+    _groups.dispose();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_isLoading) {
+    if (_groups.isLoading) {
       return const Center(child: CircularProgressIndicator());
     }
-    if (_loadError != null || deviceId == null) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(_loadError ?? 'No se pudieron cargar los grupos'),
-            const SizedBox(height: 8),
-            FilledButton(
-              onPressed: loadGroups,
-              child: const Text('Reintentar'),
-            ),
-          ],
-        ),
-      );
-    }
-
-    return FutureBuilder<List<DocumentSnapshot>>(
-      future: futureGroups,
-      builder: (context, snapshot) {
-        if (snapshot.hasError) {
-          return Center(child: Text('Error: ${snapshot.error}'));
-        }
-        if (!snapshot.hasData) {
-          return const Center(child: CircularProgressIndicator());
-        }
-
-        final docs = snapshot.data!;
-        if (docs.isEmpty) {
-          return const Center(child: Text('No perteneces a ningún grupo.'));
-        }
-
-        return ListView.builder(
-          padding: const EdgeInsets.all(16),
-          itemCount: docs.length,
-          itemBuilder: (_, i) {
-            final data = docs[i].data()! as Map<String, dynamic>;
-            return Card(
-              child: ListTile(
-                onTap: () {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (_) => GrupoDetalleScreen(
-                        groupId: docs[i].id,
-                        groupName: data['name'] ?? 'Sin nombre',
-                      ),
-                    ),
-                  );
-                },
-                title: Text(data['name'] ?? '—'),
-                subtitle: Text('Código: ${data['groupCode']}'),
+    final docs = _groups.groups;
+    final error = _groups.error;
+    return Column(
+      children: [
+        if (error != null)
+          Material(
+            color: Theme.of(context).colorScheme.errorContainer,
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Row(
+                children: [
+                  const Expanded(
+                    child: Text('No se pudieron actualizar los grupos'),
+                  ),
+                  IconButton(
+                    onPressed: _groups.refresh,
+                    tooltip: 'Reintentar',
+                    icon: const Icon(Icons.refresh),
+                  ),
+                ],
               ),
-            );
-          },
-        );
-      },
+            ),
+          ),
+        Expanded(
+          child: docs.isEmpty
+              ? Center(
+                  child: Text(
+                    error == null
+                        ? 'No perteneces a ningún grupo.'
+                        : 'No se pudieron cargar los grupos.',
+                  ),
+                )
+              : ListView.builder(
+                  padding: const EdgeInsets.all(16),
+                  itemCount: docs.length,
+                  itemBuilder: (_, i) {
+                    final data = docs[i].data()!;
+                    return Card(
+                      key: ValueKey(docs[i].id),
+                      child: ListTile(
+                        onTap: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => GrupoDetalleScreen(
+                                groupId: docs[i].id,
+                                groupName: data['name'] ?? 'Sin nombre',
+                              ),
+                            ),
+                          );
+                        },
+                        title: Text(data['name'] ?? '—'),
+                        subtitle: Text('Código: ${data['groupCode']}'),
+                      ),
+                    );
+                  },
+                ),
+        ),
+      ],
     );
   }
 }
@@ -237,15 +212,8 @@ class _WalletScreenState extends State<WalletScreen> {
     super.dispose();
   }
 
-  double? _readDebtAmount(Map<String, dynamic> splitData) {
-    final cents = splitData['cantidadCentimos'];
-    if (cents is num) {
-      return cents.toDouble() / 100;
-    }
-
-    final amount = splitData['cantidad'];
-    return amount is num ? amount.toDouble() : null;
-  }
+  double _readDebtAmount(Map<String, dynamic> splitData) =>
+      divisionAmountCents(splitData) / 100;
 
   List<_DebtItem> _visibleDebts() {
     final debts = <_DebtItem>[];
@@ -260,11 +228,9 @@ class _WalletScreenState extends State<WalletScreen> {
         final memberId = splitData['memberId'] as String?;
         final payerId = splitData['pagadoPor'] as String? ?? '';
         final amount = _readDebtAmount(splitData);
-        final timestamp = splitData['fecha'] as Timestamp?;
         final expenseRef = splitDoc.reference.parent.parent;
         if (memberId == null ||
             expenseRef == null ||
-            amount == null ||
             amount <= 0 ||
             payerId == memberId) {
           continue;
@@ -281,9 +247,7 @@ class _WalletScreenState extends State<WalletScreen> {
             pagadoPorId: payerId,
             pagadoPorName: memberMap[payerId] ?? 'Otro',
             myPhantomId: memberId,
-            fecha: timestamp != null
-                ? DateFormat('dd/MM/yyyy').format(timestamp.toDate())
-                : 'Sin fecha',
+            fecha: formatCalendarDate(splitData['fecha'] as String),
           ),
         );
       }
@@ -416,12 +380,4 @@ class _DebtItem {
     required this.myPhantomId,
     required this.fecha,
   });
-}
-
-Future<String> getUid() async {
-  final user = FirebaseAuth.instance.currentUser;
-  if (user == null) {
-    throw Exception('Usuario no autenticado');
-  }
-  return user.uid;
 }

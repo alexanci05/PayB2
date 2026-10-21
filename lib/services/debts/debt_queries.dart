@@ -10,6 +10,14 @@ class DebtQueries {
 
   final FirebaseFirestore _firestore;
 
+  Stream<QuerySnapshot<Map<String, dynamic>>> watchSettledGroupDivisions(
+    String groupId,
+  ) => _firestore
+      .collectionGroup('divisiones')
+      .where('groupId', isEqualTo: groupId)
+      .where('pagado', isEqualTo: true)
+      .snapshots(includeMetadataChanges: true);
+
   Stream<List<QueryDocumentSnapshot<Map<String, dynamic>>>>
   watchPendingForMembers(String groupId, Iterable<String> memberIds) {
     final ids = memberIds.toSet().toList()..sort();

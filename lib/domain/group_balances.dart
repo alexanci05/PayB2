@@ -1,7 +1,5 @@
 int divisionAmountCents(Map<String, dynamic> division) {
-  final cents = division['cantidadCentimos'];
-  if (cents is num) return cents.round();
-  return (((division['cantidad'] as num?) ?? 0) * 100).round();
+  return division['cantidadCentimos'] as int;
 }
 
 class GroupBalances {
