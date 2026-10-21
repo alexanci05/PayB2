@@ -2,6 +2,7 @@ import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:payb2/services/auth/identity_mutation_tracker.dart';
+import 'package:payb2/services/notifications/notification_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:payb2/services/network/connection_status.dart';
 
@@ -18,15 +19,20 @@ class AccountAuthFailure implements Exception {
 }
 
 class AccountAuthService {
-  AccountAuthService({FirebaseAuth? auth, FirebaseFunctions? functions})
-    : _auth = auth ?? FirebaseAuth.instance,
-      _functions = functions ?? FirebaseFunctions.instance;
+  AccountAuthService({
+    FirebaseAuth? auth,
+    FirebaseFunctions? functions,
+    NotificationService? notifications,
+  }) : _auth = auth ?? FirebaseAuth.instance,
+       _functions = functions ?? FirebaseFunctions.instance,
+       _notifications = notifications;
 
   static final AccountAuthService shared = AccountAuthService();
   static const _pendingMergeTicketKey = 'pendingAccountMergeTicket';
 
   final FirebaseAuth _auth;
   final FirebaseFunctions _functions;
+  final NotificationService? _notifications;
   Future<void>? _googleInitialization;
   Future<void>? _mergeRecovery;
 
@@ -181,9 +187,13 @@ class AccountAuthService {
   }
 
   Future<void> _completeMerge(String ticket) async {
-    await _functions.httpsCallable('fusionarCuentaAnonima').callObserved<void>({
-      'mergeTicket': ticket,
-    });
+    await (_notifications ?? NotificationService.shared).reconcileAccountMerge(
+      () async {
+        await _functions
+            .httpsCallable('fusionarCuentaAnonima')
+            .callObserved<void>({'mergeTicket': ticket});
+      },
+    );
   }
 
   Future<void> _activateMerge(String ticket) async {

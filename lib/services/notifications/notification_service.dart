@@ -31,6 +31,10 @@ class NotificationService {
   static const _permissionRequestedPreferenceKey =
       'notifications.permissionRequested';
   static const _removalPendingPreferenceKey = 'notifications.removalPending';
+  static const _registrationRevisionPreferenceKey =
+      'notifications.registrationRevision';
+  static const _removalAcknowledgedRevisionPreferenceKey =
+      'notifications.removalAcknowledgedRevision';
 
   final ValueNotifier<bool> _enabled = ValueNotifier<bool>(false);
   final Future<void> Function(bool) _setAutoInitEnabled;
@@ -158,6 +162,36 @@ class NotificationService {
     await refreshStatus();
   }
 
+  Future<void> reconcileAccountMerge(Future<void> Function() merge) async {
+    final preferences = await SharedPreferences.getInstance();
+    // Persist before the request: the server may commit without a client reply.
+    await _invalidateRemovalAcknowledgement(preferences);
+    try {
+      await merge();
+    } finally {
+      await _invalidateRemovalAcknowledgement(preferences);
+      if (preferences.getBool(_enabledPreferenceKey) == false) {
+        // Removal takes the identity lock, which the merge caller still owns.
+        _scheduleRegistrationRemoval();
+      }
+    }
+  }
+
+  Future<void> _invalidateRemovalAcknowledgement(
+    SharedPreferences preferences,
+  ) async {
+    final revision =
+        preferences.getInt(_registrationRevisionPreferenceKey) ?? 0;
+    if (!await preferences.setInt(
+      _registrationRevisionPreferenceKey,
+      revision + 1,
+    )) {
+      throw StateError(
+        'No se pudo guardar la baja pendiente de notificaciones',
+      );
+    }
+  }
+
   Future<void> _initializeLocalNotifications() async {
     const settings = InitializationSettings(
       android: AndroidInitializationSettings('@mipmap/ic_launcher'),
@@ -251,9 +285,18 @@ class NotificationService {
         final preferences = await SharedPreferences.getInstance();
         final pending =
             preferences.getBool(_removalPendingPreferenceKey) ?? true;
-        if (!pending) return;
+        final revision =
+            preferences.getInt(_registrationRevisionPreferenceKey) ?? 0;
+        final acknowledgedRevision =
+            preferences.getInt(_removalAcknowledgedRevisionPreferenceKey) ?? 0;
+        if (!pending && revision == acknowledgedRevision) return;
 
         await _removeRegistration();
+        // A late delete must not acknowledge a merge that started after it.
+        await preferences.setInt(
+          _removalAcknowledgedRevisionPreferenceKey,
+          revision,
+        );
         await preferences.setBool(_removalPendingPreferenceKey, false);
       }).catchError((Object error, StackTrace stackTrace) {
         debugPrint(
