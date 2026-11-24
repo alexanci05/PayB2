@@ -24,28 +24,12 @@ service cloud.firestore {
         get(/databases/$(database)/documents/groups/$(groupId)).data.ownerDeviceId == request.auth.uid;
     }
 
-    function isGroupAdmin(groupId) {
-      return isGroupOwner(groupId) ||
-        (isGroupMember(groupId) &&
-          get(/databases/$(database)/documents/groups/$(groupId)).data.get('allMembersAreAdmins', false) == true);
-    }
-
-    function ownsMemberIdentity(groupId, memberId) {
-      return isGroupMember(groupId) &&
-        get(/databases/$(database)/documents/groups/$(groupId)/members/$(memberId)).data.reclamadoPor == request.auth.uid;
-    }
-
     match /usuarios/{uid} {
       allow read, write: if false;
 
       match /devices/{installationId} {
         allow read: if signedIn() && request.auth.uid == uid;
-        allow create, update: if accountCanMutate() && request.auth.uid == uid &&
-          request.resource.data.keys().hasOnly(['fcmToken', 'tokenUpdatedAt']) &&
-          request.resource.data.fcmToken is string &&
-          request.resource.data.fcmToken.size() > 0 &&
-          request.resource.data.fcmToken.size() <= 4096 &&
-          request.resource.data.tokenUpdatedAt == request.time;
+        allow create, update: if false;
         allow delete: if accountCanMutate() && request.auth.uid == uid;
       }
     }
@@ -63,11 +47,7 @@ service cloud.firestore {
     match /groups/{groupId} {
       allow create: if false;
       allow read: if isGroupMember(groupId) || isGroupOwner(groupId);
-      allow update: if accountCanMutate() && isGroupAdmin(groupId) &&
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name']) &&
-        request.resource.data.name is string &&
-        request.resource.data.name.size() > 0 &&
-        request.resource.data.name.size() <= 80;
+      allow update: if false;
       allow delete: if false;
 
       match /members/{memberId} {
@@ -84,19 +64,7 @@ service cloud.firestore {
         match /divisiones/{divisionId} {
           allow read: if isGroupMember(groupId);
           allow create: if false;
-          allow update: if accountCanMutate() &&
-            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['pagado', 'pagadoEn', 'pagoRegistradoPor']) &&
-            ((resource.data.pagado == false &&
-                request.resource.data.pagado == true &&
-                request.resource.data.pagadoEn is timestamp &&
-                ((ownsMemberIdentity(groupId, resource.data.memberId) &&
-                    request.resource.data.pagoRegistradoPor == resource.data.memberId) ||
-                  (ownsMemberIdentity(groupId, resource.data.pagadoPor) &&
-                    request.resource.data.pagoRegistradoPor == resource.data.pagadoPor))) ||
-              (ownsMemberIdentity(groupId, resource.data.pagadoPor) &&
-                resource.data.pagado == true &&
-                request.resource.data.pagado == false &&
-                !request.resource.data.keys().hasAny(['pagadoEn', 'pagoRegistradoPor'])));
+          allow update: if false;
           allow delete: if false;
         }
       }

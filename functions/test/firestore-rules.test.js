@@ -122,12 +122,12 @@ test('un miembro puede consultar las divisiones de su grupo', async () => {
   await assertFails(getDocs(outsiderQuery));
 });
 
-test('el propietario puede renombrar su grupo con un nombre valido', async () => {
+test('el propietario debe renombrar por callable incluso con un nombre valido', async () => {
   const db = testEnv.authenticatedContext('creditor-uid').firestore();
   const group = doc(db, 'groups/group-1');
 
-  await assertSucceeds(updateDoc(group, { name: 'Viaje nuevo' }));
-  await assertSucceeds(updateDoc(group, { name: 'A'.repeat(80) }));
+  await assertFails(updateDoc(group, { name: 'Viaje nuevo' }));
+  await assertFails(updateDoc(group, { name: 'A'.repeat(80) }));
 });
 
 test('el propietario no puede usar nombres invalidos', async () => {
@@ -164,13 +164,13 @@ test('un miembro que no es propietario no puede renombrar el grupo', async () =>
   }));
 });
 
-test('la administracion compartida permite renombrar solo a miembros y se puede revocar', async () => {
+test('la administracion compartida tampoco permite saltarse las cuotas de renombrado', async () => {
   const member = doc(testEnv.authenticatedContext('debtor-uid').firestore(), 'groups/group-1');
   const outsider = doc(testEnv.authenticatedContext('outsider-uid').firestore(), 'groups/group-1');
   await testEnv.withSecurityRulesDisabled(async (context) => {
     await updateDoc(doc(context.firestore(), 'groups/group-1'), { allMembersAreAdmins: true });
   });
-  await assertSucceeds(updateDoc(member, { name: 'Compartido' }));
+  await assertFails(updateDoc(member, { name: 'Compartido' }));
   await assertFails(updateDoc(outsider, { name: 'Ajeno' }));
   await assertFails(updateDoc(member, { name: '' }));
   await assertFails(updateDoc(member, { name: 'A'.repeat(81) }));
@@ -249,10 +249,10 @@ test('un cliente no puede eliminar directamente gastos ni divisiones', async () 
   await assertFails(deleteDoc(doc(db, 'groups/group-1/gastosProgramados/schedule-1')));
 });
 
-test('el deudor puede marcar su propia deuda como pagada', async () => {
+test('el deudor no puede saltarse la callable de pagos con una escritura directa', async () => {
   const db = testEnv.authenticatedContext('debtor-uid').firestore();
 
-  await assertSucceeds(
+  await assertFails(
     updateDoc(debtRef(db), {
       pagado: true,
       pagadoEn: serverTimestamp(),
@@ -261,16 +261,30 @@ test('el deudor puede marcar su propia deuda como pagada', async () => {
   );
 });
 
-test('el acreedor puede registrar como cobrada una deuda que se le debe', async () => {
+test('el acreedor tampoco puede registrar un cobro directamente', async () => {
   const db = testEnv.authenticatedContext('creditor-uid').firestore();
 
-  await assertSucceeds(
+  await assertFails(
     updateDoc(debtRef(db), {
       pagado: true,
       pagadoEn: serverTimestamp(),
       pagoRegistradoPor: 'creditor',
     }),
   );
+});
+
+test('ni el deudor ni el acreedor pueden falsificar la fecha de pago', async () => {
+  for (const member of ['debtor', 'creditor']) {
+    const db = testEnv.authenticatedContext(`${member}-uid`).firestore();
+    for (const pagadoEn of [new Date(0), new Date('2100-01-01T00:00:00Z'), null, 'now']) {
+      await assertFails(updateDoc(debtRef(db), {
+        pagado: true, pagadoEn, pagoRegistradoPor: member,
+      }));
+    }
+    await assertFails(updateDoc(debtRef(db), {
+      pagado: true, pagoRegistradoPor: member,
+    }));
+  }
 });
 
 test('otro miembro no puede cerrar una deuda ajena', async () => {
@@ -307,7 +321,7 @@ test('la administracion compartida no permite pagar ni reabrir deudas ajenas', a
   }));
 });
 
-test('el acreedor puede reabrir pagos confirmados por el deudor o por el mismo', async () => {
+test('las reaperturas tambien deben pasar por la callable aunque sean del acreedor', async () => {
   const db = testEnv.authenticatedContext('creditor-uid').firestore();
   for (const registeredBy of ['debtor', 'creditor']) {
     await testEnv.withSecurityRulesDisabled(async (context) => {
@@ -317,7 +331,7 @@ test('el acreedor puede reabrir pagos confirmados por el deudor o por el mismo',
         pagoRegistradoPor: registeredBy,
       });
     });
-    await assertSucceeds(
+    await assertFails(
       updateDoc(debtRef(db), {
         pagado: false,
         pagadoEn: deleteField(),
@@ -351,14 +365,38 @@ function debtRef(db) {
   return doc(db, 'groups/group-1/gastos/expense-1/divisiones/debtor');
 }
 
-test('cada cuenta solo puede registrar y borrar sus propios dispositivos', async () => {
+test('los dispositivos solo se registran por servidor y cada cuenta puede leer y borrar los suyos', async () => {
   const owner = testEnv.authenticatedContext('creditor-uid').firestore();
   const other = testEnv.authenticatedContext('other-uid').firestore();
+  const anonymous = testEnv.unauthenticatedContext().firestore();
   const path = 'usuarios/creditor-uid/devices/phone';
   const device = { fcmToken: 'phone-token', tokenUpdatedAt: serverTimestamp() };
-  await assertSucceeds(setDoc(doc(owner, path), device));
-  await assertFails(setDoc(doc(other, path), device));
-  await assertFails(setDoc(doc(owner, path), { fcmToken: 'missing-timestamp' }));
+  for (const db of [owner, other, anonymous]) {
+    await assertFails(setDoc(doc(db, path), device));
+  }
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    await setDoc(doc(context.firestore(), path), device);
+  });
+  for (const db of [owner, other, anonymous]) {
+    await assertFails(updateDoc(doc(db, path), { fcmToken: 'replacement-token' }));
+    await assertFails(setDoc(doc(db, path), device));
+  }
+  await assertSucceeds(getDoc(doc(owner, path)));
+  await assertFails(getDoc(doc(other, path)));
+  await assertFails(getDoc(doc(anonymous, path)));
+  await assertFails(deleteDoc(doc(anonymous, path)));
   await assertFails(deleteDoc(doc(other, path)));
   await assertSucceeds(deleteDoc(doc(owner, path)));
+});
+
+test('el registro compartido de dispositivos no es accesible por clientes', async () => {
+  const db = testEnv.authenticatedContext('creditor-uid').firestore();
+  const registry = doc(db, 'deviceRegistries/creditor-uid');
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    await setDoc(doc(context.firestore(), registry.path), { revision: 1 });
+  });
+  await assertFails(getDoc(registry));
+  await assertFails(setDoc(registry, { revision: 0 }));
+  await assertFails(updateDoc(registry, { revision: 2 }));
+  await assertFails(deleteDoc(registry));
 });

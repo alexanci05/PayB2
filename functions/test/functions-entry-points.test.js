@@ -12,8 +12,19 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
   const { deleteApp, getApp } = require('firebase-admin/app');
   const { getFirestore, Timestamp } = require('firebase-admin/firestore');
   const { getMessaging } = require('firebase-admin/messaging');
-  const entryPoints = require('../index');
+  const exportedFunctions = require('../index');
+  // Direct .run calls represent requests whose App Check token was verified by the SDK.
+  const entryPoints = Object.fromEntries(Object.entries(exportedFunctions).map(([name, fn]) => [
+    name,
+    fn.__endpoint?.callableTrigger ? {
+      run: (data, context) => fn.run(data, { app: { appId: 'test-app' }, ...context }),
+    } : fn,
+  ]));
   const { scheduledOccurrenceId, scheduleInstant, nextScheduledDate, todayInZone } = require('../lib/scheduled-occurrences');
+  const {
+    MAX_OCCURRENCES_PER_DAY, MAX_OCCURRENCES_PER_GROUP_PER_DAY,
+    MAX_SCHEDULED_GROUPS_PER_RUN,
+  } = require('../lib/security-policy');
   const {
     AccountMergeConflictError,
     activateAccountMerge,
@@ -23,6 +34,7 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     prepareAccountMerge,
   } = require('../lib/account-merge');
   const db = getFirestore();
+  const { runDebtReminders, REMINDER_LIMITS } = require('../lib/debt-reminders');
   const projectId = process.env.GCLOUD_PROJECT;
 
   beforeEach(async () => {
@@ -173,6 +185,15 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     await assertNoGroupCreationWrites();
   });
 
+  test('una cuenta no puede superar la cuota diaria de creación de grupos', async () => {
+    const context = { auth: { uid: 'owner-uid' } };
+    for (let index = 0; index < 10; index += 1) {
+      await entryPoints.crearGrupo.run(groupInput(), context);
+    }
+    await assert.rejects(entryPoints.crearGrupo.run(groupInput(), context), { code: 'resource-exhausted' });
+    assert.equal((await db.collection('groups').get()).size, 10);
+  });
+
   test('crearGrupo replays the same request with one group, code and membership', async () => {
     const input = groupInput();
     const auth = { auth: { uid: 'owner-uid' } };
@@ -182,6 +203,54 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
 
     assert.deepEqual(repeated, first);
     await assertSingleCreatedGroup(first);
+  });
+
+  test('solo las creaciones nuevas y validas consumen el cupo global, no errores ni reintentos', async () => {
+    const context = { auth: { uid: 'owner-uid' } };
+    const budget = db.doc('usageLimits/project');
+    await assert.rejects(entryPoints.crearGrupo.run(groupInput({ nombre: '' }), context), { code: 'invalid-argument' });
+    assert.equal((await budget.get()).exists, false);
+    const input = groupInput();
+    const group = await entryPoints.crearGrupo.run(input, context);
+    const expense = expenseInput({ groupId: group.groupId, pagadoPor: 'member_001', participantes: ['member_002'] });
+    const created = await entryPoints.crearGasto.run(expense, context);
+    await assert.rejects(entryPoints.crearGasto.run({ ...expense, requestId: db.collection('groups').doc().id },
+      { auth: { uid: 'outsider' } }), { code: 'permission-denied' });
+    assert.equal((await budget.get()).get('dayCount'), 2);
+    await budget.set({ day: new Date().toISOString().slice(0, 10), dayCount: 1000 });
+    assert.deepEqual(await entryPoints.crearGrupo.run(input, context), group);
+    assert.deepEqual(await entryPoints.crearGasto.run(expense, context), created);
+    await assert.rejects(entryPoints.crearGrupo.run(groupInput(), context), { code: 'resource-exhausted' });
+    await assert.rejects(entryPoints.crearGasto.run(expenseInput({
+      ...expense, requestId: db.collection('groups').doc().id,
+    }), context), { code: 'resource-exhausted' });
+    assert.equal((await db.collection('groups').get()).size, 1);
+    assert.equal((await db.collection('groups').doc(group.groupId).collection('gastos').get()).size, 1);
+    assert.equal((await budget.get()).get('dayCount'), 1000);
+  });
+
+  test('agotar las creaciones no bloquea registro de dispositivos ni recuperacion o cancelacion de fusiones', async () => {
+    const anonymous = (uid) => ({ auth: { uid, token: { firebase: { sign_in_provider: 'anonymous' } } } });
+    const source = anonymous('source');
+    const cancelSource = anonymous('cancel-source');
+    const ticket = (await entryPoints.prepararFusionCuenta.run({}, source)).mergeTicket;
+    const cancelTicket = (await entryPoints.prepararFusionCuenta.run({}, cancelSource)).mergeTicket;
+    await entryPoints.bloquearFusionCuenta.run({ mergeTicket: cancelTicket }, cancelSource);
+    const budget = db.doc('usageLimits/project');
+    await budget.set({ day: new Date().toISOString().slice(0, 10), dayCount: 1000 });
+    assert.equal((await entryPoints.prepararFusionCuenta.run({}, source)).mergeTicket, ticket);
+    const installationId = 'a'.repeat(48);
+    await entryPoints.registrarDispositivo.run({ installationId, fcmToken: 'test-token' }, source);
+    assert.equal((await db.doc(`usuarios/source/devices/${installationId}`).get()).exists, true);
+    await entryPoints.bloquearFusionCuenta.run({ mergeTicket: ticket }, source);
+    const target = { auth: { uid: 'target', token: { firebase: { sign_in_provider: 'google.com' } } } };
+    const result = await entryPoints.fusionarCuentaAnonima.run({ mergeTicket: ticket }, target);
+    assert.deepEqual(await entryPoints.fusionarCuentaAnonima.run({ mergeTicket: ticket }, target), result);
+    assert.equal((await db.doc(`usuarios/target/devices/${installationId}`).get()).exists, true);
+    await entryPoints.cancelarFusionCuenta.run({ mergeTicket: cancelTicket }, cancelSource);
+    assert.equal((await db.doc('accountMerges/cancel-source').get()).exists, false);
+    await assert.rejects(entryPoints.prepararFusionCuenta.run({}, anonymous('new-source')), { code: 'resource-exhausted' });
+    assert.equal((await budget.get()).get('dayCount'), 1000);
   });
 
   test('crearGrupo handles concurrent retries with one group, code and membership', async () => {
@@ -487,17 +556,31 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     await assert.rejects(completeAccountMerge(db, ticket, 'target-uid'), AccountMergeConflictError);
   });
 
-  test('canceling a different prepared ticket never releases the original merge lock', async () => {
+  test('un origen ya vinculado puede cancelar su ticket tras rechazar una fusion hacia si mismo', async () => {
+    const ticket = await prepareAccountMerge(db, 'source-uid');
+    await activateAccountMerge(db, 'source-uid', ticket);
+    const protectedSource = { auth: { uid: 'source-uid', token: { firebase: { sign_in_provider: 'google.com' } } } };
+    await assert.rejects(entryPoints.fusionarCuentaAnonima.run({ mergeTicket: ticket }, protectedSource), (error) =>
+      error.code === 'failed-precondition' && error.details?.reason === 'same-account');
+    await assert.rejects(entryPoints.cancelarFusionCuenta.run({ mergeTicket: ticket }, {
+      auth: { uid: 'foreign-uid', token: { firebase: { sign_in_provider: 'google.com' } } },
+    }), { code: 'failed-precondition' });
+    assert.equal((await db.doc('accountMerges/source-uid').get()).exists, true);
+    await entryPoints.cancelarFusionCuenta.run({ mergeTicket: ticket }, protectedSource);
+    assert.equal((await db.doc('accountMerges/source-uid').get()).exists, false);
+  });
+
+  test('reusing an active preparation or canceling a missing ticket preserves the merge lock', async () => {
     const original = await prepareAccountMerge(db, 'source-uid');
     await activateAccountMerge(db, 'source-uid', original);
     const mergeRef = db.collection('accountMerges').doc('source-uid');
     const originalLock = (await mergeRef.get()).data();
-    const other = await prepareAccountMerge(db, 'source-uid');
-
+    assert.equal(await prepareAccountMerge(db, 'source-uid'), original);
+    await activateAccountMerge(db, 'source-uid', original);
+    const other = 'missing-ticket-from-another-preparation';
     await assert.rejects(activateAccountMerge(db, 'source-uid', other), AccountMergeConflictError);
-    await assert.rejects(cancelAccountMerge(db, 'foreign-uid', other), AccountMergeConflictError);
-    await cancelAccountMerge(db, 'source-uid', other);
-    await cancelAccountMerge(db, 'source-uid', other);
+    await assert.rejects(cancelAccountMerge(db, 'foreign-uid', original), AccountMergeConflictError);
+    await assert.rejects(cancelAccountMerge(db, 'source-uid', other), AccountMergeConflictError);
 
     assert.deepEqual((await mergeRef.get()).data(), originalLock);
     await assert.rejects(
@@ -801,7 +884,7 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     );
   });
 
-  test('crearGasto catches up monthly occurrences while preserving its anchor', async () => {
+  test('crearGasto recovers monthly occurrences incrementally while preserving its anchor', async () => {
     const groupRef = await seedExpenseGroup();
     const result = await entryPoints.crearGasto.run(
       expenseInput({ fecha: '2024-01-31', frecuencia: 'Mensual (mismo d\u00eda todos los meses)' }),
@@ -810,6 +893,7 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     const scheduleRef = groupRef.collection('gastosProgramados').doc(result.scheduleId);
     assert.equal((await scheduleRef.get()).get('diaAncla'), 31);
 
+    await entryPoints.ejecutarGastosPeriodicos.run({});
     await entryPoints.ejecutarGastosPeriodicos.run({});
 
     const [schedule, expenses] = await Promise.all([
@@ -820,7 +904,7 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
       expenses.docs.map((doc) => doc.get('fecha')),
     );
     assert.equal(schedule.get('diaAncla'), 31);
-    assert.ok(schedule.get('proximaEjecucion').toMillis() > Date.now());
+    assert.equal(schedule.get('proximaFecha'), '2024-04-30');
     assert.ok(occurrenceDates.has('2024-01-31'));
     assert.ok(occurrenceDates.has('2024-02-29'));
     assert.ok(occurrenceDates.has('2024-03-31'));
@@ -988,6 +1072,7 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     await scheduleRef.update({
       proximaFecha: yesterday,
       proximaEjecucion: Timestamp.fromDate(scheduleInstant(yesterday, 'Europe/Madrid')),
+      nextAttemptAt: Timestamp.fromDate(scheduleInstant(yesterday, 'Europe/Madrid')),
     });
     await entryPoints.ejecutarGastosPeriodicos.run({});
     const expenses = await groupRef.collection('gastos').get();
@@ -1170,6 +1255,7 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
         await scheduleRef.update({
           proximaFecha: nextDate,
           proximaEjecucion: Timestamp.fromDate(scheduleInstant(nextDate, 'Europe/Madrid')),
+          nextAttemptAt: Timestamp.fromDate(scheduleInstant(nextDate, 'Europe/Madrid')),
         });
       } else {
         await scheduleRef.delete();
@@ -1187,12 +1273,196 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     }
   });
 
+  async function seedPayment() {
+    const group = await seedExpenseGroup();
+    await group.collection('members').doc('alice').update({ reclamadoPor: 'debtor-uid' });
+    await db.doc('groupMembers/expense-group_debtor-uid').set({
+      groupId: group.id, deviceId: 'debtor-uid',
+    });
+    const debt = group.collection('gastos').doc('payment-expense').collection('divisiones').doc('alice');
+    await debt.set({ groupId: group.id, memberId: 'alice', pagadoPor: 'payer', pagado: false, cantidadCentimos: 500 });
+    const pay = (pagado, uid, extra = {}) => entryPoints.registrarPagoDeuda.run({
+      groupId: group.id, gastoId: 'payment-expense', divisionId: 'alice', pagado, ...extra,
+    }, { auth: { uid } });
+    const observed = async () => {
+      const snapshot = await debt.get();
+      const time = snapshot.get('pagadoEn');
+      return {
+        pagadoEn: { seconds: time.seconds, nanoseconds: time.nanoseconds },
+        pagoRegistradoPor: snapshot.get('pagoRegistradoPor'),
+      };
+    };
+    return { group, debt, pay, observed };
+  }
+
+  test('pagos: deudor y acreedor pueden confirmar sin duplicar ni aceptar fechas o importes del cliente', async () => {
+    const { debt, pay, observed } = await seedPayment();
+    await pay(true, 'debtor-uid', { pagoRegistradoPor: 'alice', pagadoEn: 0, cantidadCentimos: 1 });
+    const first = await debt.get();
+    assert.equal(first.get('cantidadCentimos'), 500);
+    assert.ok(first.get('pagadoEn') instanceof Timestamp);
+    assert.deepEqual(await pay(true, 'debtor-uid', { pagoRegistradoPor: 'alice' }), { changed: false });
+    assert.ok((await debt.get()).get('pagadoEn').isEqual(first.get('pagadoEn')));
+    await pay(false, 'payer-uid', { pagoEsperado: await observed() });
+    await pay(true, 'payer-uid', { pagoRegistradoPor: 'payer' });
+    assert.equal((await debt.get()).get('pagoRegistradoPor'), 'payer');
+  });
+
+  test('pagos: no se permite suplantar identidades ni reabrir una confirmacion posterior', async () => {
+    const { group, debt, pay, observed } = await seedPayment();
+    for (const [uid, actor] of [['outsider', 'payer'], ['debtor-uid', 'payer'], ['payer-uid', 'bob']]) {
+      await assert.rejects(pay(true, uid, { pagoRegistradoPor: actor }), { code: 'permission-denied' });
+    }
+    await group.update({ allMembersAreAdmins: true });
+    await db.doc('groupMembers/expense-group_other-uid').set({ groupId: group.id, deviceId: 'other-uid' });
+    await assert.rejects(pay(true, 'other-uid', { pagoRegistradoPor: 'alice' }), { code: 'permission-denied' });
+    await pay(true, 'debtor-uid', { pagoRegistradoPor: 'alice' });
+    const oldPayment = await observed();
+    await assert.rejects(pay(false, 'debtor-uid', { pagoEsperado: oldPayment }), { code: 'permission-denied' });
+    await pay(false, 'payer-uid', { pagoEsperado: oldPayment });
+    assert.equal((await debt.get()).get('pagadoEn'), undefined);
+    await pay(true, 'payer-uid', { pagoRegistradoPor: 'payer' });
+    await assert.rejects(pay(false, 'payer-uid', { pagoEsperado: oldPayment }), { code: 'failed-precondition' });
+    assert.equal((await debt.get()).get('pagado'), true);
+  });
+
+  test('pagos: la cuota de creaciones ajenas no bloquea pagos, pero la propia y la fusion si', async () => {
+    const { debt, pay } = await seedPayment();
+    await db.doc('accountMerges/debtor-uid').set({ status: 'prepared' });
+    await assert.rejects(pay(true, 'debtor-uid', { pagoRegistradoPor: 'alice' }), { code: 'failed-precondition' });
+    await db.doc('accountMerges/debtor-uid').delete();
+    await db.doc('usageLimits/project').set({ day: new Date().toISOString().slice(0, 10), dayCount: 1000 });
+    await pay(true, 'debtor-uid', { pagoRegistradoPor: 'alice' });
+    assert.equal((await debt.get()).get('pagado'), true);
+    const userId = createHash('sha256').update('debtor-uid').digest('hex');
+    await db.doc(`usageLimits/user_${userId}`).set({ day: new Date().toISOString().slice(0, 10), dayCount: 300 });
+    await assert.rejects(pay(true, 'debtor-uid', { pagoRegistradoPor: 'alice' }), { code: 'resource-exhausted' });
+    assert.equal((await debt.get()).get('pagado'), true);
+  });
+
+  test('el programador rota grupos y reserva el cupo diario sin perder fechas pendientes', async () => {
+    for (let index = 0; index < MAX_SCHEDULED_GROUPS_PER_RUN + 2; index += 1) {
+      const group = db.collection('groups').doc(`group-${String(index).padStart(2, '0')}`);
+      await group.set({ schedulesCheckedAt: Timestamp.fromMillis(0) });
+      await group.collection('gastosProgramados').doc('schedule').set({
+        nombre: 'Auditoria', descripcion: '', cantidadCentimos: 1001,
+        pagadoPor: 'payer', participantes: ['alice', 'bob'],
+        proximaFecha: '2020-01-01',
+        proximaEjecucion: Timestamp.fromDate(scheduleInstant('2020-01-01', 'Europe/Madrid')),
+        nextAttemptAt: Timestamp.fromDate(scheduleInstant('2020-01-01', 'Europe/Madrid')),
+        timeZone: 'Europe/Madrid', frecuencia: null, createdByUid: 'payer-uid',
+      });
+    }
+    await entryPoints.ejecutarGastosPeriodicos.run({});
+    assert.equal((await db.collectionGroup('gastos').get()).size, MAX_SCHEDULED_GROUPS_PER_RUN);
+    assert.equal((await db.collectionGroup('gastosProgramados').get()).size, 2);
+
+    const budgetRef = db.collection('usageLimits').doc('scheduledOccurrences');
+    await budgetRef.set({ day: new Date().toISOString().slice(0, 10), count: MAX_OCCURRENCES_PER_DAY - 1 });
+    await entryPoints.ejecutarGastosPeriodicos.run({});
+    await entryPoints.ejecutarGastosPeriodicos.run({});
+    assert.equal((await budgetRef.get()).get('count'), MAX_OCCURRENCES_PER_DAY);
+    assert.equal((await db.collectionGroup('gastosProgramados').get()).size, 1);
+    assert.equal((await db.collectionGroup('gastos').get()).size, MAX_SCHEDULED_GROUPS_PER_RUN + 1);
+  });
+
+  test('un grupo atrasado no desplaza a otros ni consume todo el cupo del proyecto', async () => {
+    const busy = await seedExpenseGroup();
+    for (let index = 0; index < 10; index += 1) {
+      await entryPoints.crearGasto.run(expenseInput({ fecha: '2000-01-01', frecuencia: 'Cada 7 días' }),
+        { auth: { uid: 'payer-uid' } });
+    }
+    const normal = await entryPoints.crearGrupo.run(groupInput({ timeZone: 'UTC' }), { auth: { uid: 'normal-uid' } });
+    const lastWeek = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
+    const created = await entryPoints.crearGasto.run(expenseInput({
+      groupId: normal.groupId, pagadoPor: 'member_001', participantes: ['member_002'],
+      fecha: lastWeek, frecuencia: 'Cada 7 días',
+    }), { auth: { uid: 'normal-uid' } });
+    await entryPoints.ejecutarGastosPeriodicos.run({});
+    const normalSchedule = await db.doc(`groups/${normal.groupId}/gastosProgramados/${created.scheduleId}`).get();
+    assert.ok(normalSchedule.get('proximaFecha') > new Date().toISOString().slice(0, 10));
+    const checkedAt = (await busy.get()).get('schedulesCheckedAt');
+    await entryPoints.crearGasto.run(expenseInput({ fecha: '2000-01-01', frecuencia: 'Cada 7 días' }),
+      { auth: { uid: 'payer-uid' } });
+    assert.ok((await busy.get()).get('schedulesCheckedAt').isEqual(checkedAt));
+    const groupBudget = db.doc(`usageLimits/scheduledGroup_${busy.id}`);
+    await groupBudget.set({ day: new Date().toISOString().slice(0, 10), count: MAX_OCCURRENCES_PER_GROUP_PER_DAY });
+    const before = (await busy.collection('gastos').get()).size;
+    await entryPoints.ejecutarGastosPeriodicos.run({});
+    assert.equal((await busy.collection('gastos').get()).size, before);
+    assert.equal((await db.doc('usageLimits/scheduledOccurrences').get()).get('count'), 2);
+    assert.equal((await busy.collection('gastosProgramados').get()).size, 11);
+  });
+
+  test('los turnos avanzan ante grupos vacios y programaciones futuras', async () => {
+    const { claimScheduledGroup } = require('../lib/scheduled-groups');
+    const empty = db.doc('groups/empty');
+    await empty.set({ schedulesCheckedAt: Timestamp.fromMillis(0) });
+    assert.equal(await claimScheduledGroup(db, await empty.get(), Timestamp.now()), null);
+    assert.equal((await empty.get()).get('schedulesCheckedAt'), undefined);
+
+    const future = await seedExpenseGroup();
+    const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+    await entryPoints.crearGasto.run(expenseInput({ fecha: tomorrow }), { auth: { uid: 'payer-uid' } });
+    const queued = await future.get();
+    const claims = await Promise.all([
+      claimScheduledGroup(db, queued, Timestamp.now()), claimScheduledGroup(db, queued, Timestamp.now()),
+    ]);
+    assert.deepEqual(claims, [null, null]);
+    assert.ok((await future.get()).get('schedulesCheckedAt').toMillis() > 0);
+    assert.equal((await future.collection('gastosProgramados').get()).size, 1);
+  });
+
+  test('invalid schedule timestamps are quarantined while group turns and healthy schedules advance', async () => {
+    const { claimScheduledGroup } = require('../lib/scheduled-groups');
+    const invalidRefs = [];
+    // Occupy the entire first page with malformed legacy schedules.
+    for (let index = 0; index < MAX_SCHEDULED_GROUPS_PER_RUN; index += 1) {
+      const group = db.doc(`groups/quarantine-${index}`);
+      const invalid = group.collection('gastosProgramados').doc('invalid');
+      await group.set({ schedulesCheckedAt: Timestamp.fromMillis(0) });
+      await invalid.set({ nextAttemptAt: index % 2 === 0 ? null : 'invalid-timestamp' });
+      invalidRefs.push(invalid);
+    }
+    const healthy = db.doc('groups/healthy-after-quarantine');
+    await healthy.set({ schedulesCheckedAt: Timestamp.fromMillis(1) });
+    const scheduledDate = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+    await healthy.collection('gastosProgramados').doc('healthy').set({
+      nombre: 'Healthy', cantidadCentimos: 1000, pagadoPor: 'payer', participantes: ['debtor'],
+      proximaFecha: scheduledDate, proximaEjecucion: Timestamp.fromMillis(1),
+      nextAttemptAt: Timestamp.fromMillis(1), timeZone: 'UTC', frecuencia: null,
+      createdByUid: 'healthy-owner',
+    });
+
+    await entryPoints.ejecutarGastosPeriodicos.run({});
+    for (const invalid of invalidRefs) {
+      const quarantined = await invalid.get();
+      assert.equal(quarantined.get('nextAttemptAt'), undefined);
+      assert.equal(quarantined.get('quarantineReason'), 'invalid-next-attempt-at');
+      assert.ok(quarantined.get('quarantinedAt') instanceof Timestamp);
+      assert.ok((await invalid.parent.parent.get()).get('schedulesCheckedAt').toMillis() > 1);
+    }
+    await entryPoints.ejecutarGastosPeriodicos.run({});
+    assert.equal((await healthy.collection('gastos').get()).size, 1);
+
+    // A healthy schedule within a quarantined group is discoverable on its next turn.
+    for (const invalid of [invalidRefs[0], invalidRefs[1]]) {
+      const group = invalid.parent.parent;
+      await group.update({ schedulesCheckedAt: Timestamp.fromMillis(0) });
+      const next = group.collection('gastosProgramados').doc('healthy');
+      await next.set({ nextAttemptAt: Timestamp.fromMillis(1) });
+      const claimed = await claimScheduledGroup(db, await group.get(), Timestamp.now());
+      assert.equal(claimed.ref.path, next.path);
+      assert.equal((await invalid.get()).get('nextAttemptAt'), undefined);
+    }
+  });
+
   test('ejecutarGastosPeriodicos creates shares and advances recurring schedules', async () => {
     const scheduledDate = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
     const expectedNextDate = nextScheduledDate(scheduledDate, 'Cada 7 días');
     const scheduleRef = db.collection('groups').doc('group-1').collection('gastosProgramados').doc('schedule-1');
     await Promise.all([
-      db.collection('groups').doc('group-1').set({ name: 'Viaje' }),
+      db.collection('groups').doc('group-1').set({ name: 'Viaje', schedulesCheckedAt: Timestamp.fromMillis(0) }),
       scheduleRef.set({
         nombre: 'Alquiler',
         cantidadCentimos: 1001,
@@ -1200,6 +1470,7 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
         participantes: ['member-a', 'member-b', 'member-c'],
         proximaFecha: scheduledDate,
         proximaEjecucion: Timestamp.fromDate(scheduleInstant(scheduledDate, 'Pacific/Auckland')),
+        nextAttemptAt: Timestamp.fromDate(scheduleInstant(scheduledDate, 'Pacific/Auckland')),
         timeZone: 'Pacific/Auckland',
         frecuencia: 'Cada 7 días',
         createdByMemberId: 'member-b',
@@ -1228,7 +1499,7 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     const groupRef = db.collection('groups').doc('locked-group');
     const scheduleRef = groupRef.collection('gastosProgramados').doc('schedule-1');
     await Promise.all([
-      groupRef.set({ name: 'Viaje' }),
+      groupRef.set({ name: 'Viaje', schedulesCheckedAt: Timestamp.fromMillis(0) }),
       scheduleRef.set({
         nombre: 'Alquiler',
         cantidadCentimos: 1000,
@@ -1236,6 +1507,7 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
         participantes: ['debtor'],
         proximaFecha: '2024-01-31',
         proximaEjecucion: Timestamp.fromDate(scheduleInstant('2024-01-31', 'Europe/Madrid')),
+        nextAttemptAt: Timestamp.fromDate(scheduleInstant('2024-01-31', 'Europe/Madrid')),
         timeZone: 'Europe/Madrid',
         frecuencia: 'Cada 7 días',
         createdByMemberId: 'payer',
@@ -1248,6 +1520,17 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
 
     await assert.rejects(entryPoints.ejecutarGastosPeriodicos.run({}), AggregateError);
     assert.equal((await groupRef.collection('gastos').get()).empty, true);
+    assert.ok((await groupRef.get()).get('schedulesCheckedAt').toMillis() > 0);
+    await groupRef.collection('gastosProgramados').doc('other-schedule').set({
+      nombre: 'Otra deuda', cantidadCentimos: 1000, pagadoPor: 'payer', participantes: ['debtor'],
+      proximaFecha: '2024-02-01',
+      proximaEjecucion: Timestamp.fromDate(scheduleInstant('2024-02-01', 'Europe/Madrid')),
+      nextAttemptAt: Timestamp.fromDate(scheduleInstant('2024-02-01', 'Europe/Madrid')),
+      timeZone: 'Europe/Madrid', frecuencia: null, createdByUid: 'other-uid',
+    });
+    await entryPoints.ejecutarGastosPeriodicos.run({});
+    assert.equal((await groupRef.collection('gastos').get()).size, 1);
+    assert.equal((await scheduleRef.get()).get('proximaFecha'), '2024-01-31');
   });
 
   test('onDeudaPagada notifies the creditor once when the same event is retried', async () => {
@@ -1276,6 +1559,7 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
           },
           {
             eventId: 'payment-event-1',
+            timestamp: new Date().toISOString(),
             params: { groupId: 'group-1', gastoId: 'expense-1', divisionId: 'debtor' },
           },
         );
@@ -1323,8 +1607,8 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     messaging.send = async (message) => sent.push(message);
 
     try {
-      await entryPoints.recordatorioDeudas.run({});
-      await entryPoints.recordatorioDeudas.run({});
+      await runDebtReminders({ db, messaging, now: new Date('2026-11-04T15:15:00Z') });
+      await runDebtReminders({ db, messaging, now: new Date('2026-11-04T15:15:00Z') });
     } finally {
       messaging.send = originalSend;
     }
@@ -1337,6 +1621,180 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
       },
     }]);
     assert.equal((await db.collection('reminderDeliveries').get()).size, 1);
+  });
+
+  test('renombrarGrupo permits only admins and freezes merging accounts', async () => {
+    const group = db.doc('groups/rename-group');
+    await Promise.all([
+      group.set({ name: 'Antes', ownerDeviceId: 'owner', allMembersAreAdmins: false }),
+      db.doc('groupMembers/rename-group_member').set({ groupId: 'rename-group', deviceId: 'member' }),
+    ]);
+    const rename = (uid, nombre = '  Después  ', groupId = 'rename-group') =>
+      entryPoints.renombrarGrupo.run({ groupId, nombre }, { auth: { uid } });
+    await assert.rejects(rename('member'), { code: 'permission-denied' });
+    await assert.rejects(rename('stranger'), { code: 'permission-denied' });
+    assert.deepEqual(await rename('owner'), { renamed: true });
+    assert.equal((await group.get()).get('name'), 'Después');
+    await group.update({ allMembersAreAdmins: true });
+    assert.deepEqual(await rename('member', 'Miembros'), { renamed: true });
+    await assert.rejects(rename('stranger'), { code: 'permission-denied' });
+    await db.doc('groupMembers/rename-group_stranger').set({ groupId: 'another-group', deviceId: 'stranger' });
+    await assert.rejects(rename('stranger'), { code: 'permission-denied' });
+    await db.doc('accountMerges/owner').set({ status: 'running' });
+    await assert.rejects(rename('owner'), { code: 'failed-precondition' });
+    assert.equal((await group.get()).get('name'), 'Miembros');
+  });
+
+  test('renombrarGrupo rejects invalid input and requires auth and App Check', async () => {
+    for (const data of [
+      {}, { groupId: 'bad/path', nombre: 'Valid' }, { groupId: 'group', nombre: '   ' },
+      { groupId: 'group', nombre: 'a'.repeat(81) }, { groupId: 'group', nombre: 12 },
+    ]) {
+      await assert.rejects(entryPoints.renombrarGrupo.run(data, { auth: { uid: 'owner' } }), { code: 'invalid-argument' });
+    }
+    await assert.rejects(entryPoints.renombrarGrupo.run({}, {}), { code: 'unauthenticated' });
+    await assert.rejects(exportedFunctions.renombrarGrupo.run(
+      { groupId: 'group', nombre: 'Name' }, { auth: { uid: 'owner' } },
+    ), { code: 'failed-precondition' });
+  });
+
+  async function seedReminderDivisions(count) {
+    for (let i = 0; i < count; i++) {
+      const uid = `user-${i}`;
+      await Promise.all([
+        db.doc(`usuarios/${uid}/devices/phone`).set({ fcmToken: uid }),
+        db.doc(`groupMembers/reminder-group_${uid}`).set({ groupId: 'reminder-group', deviceId: uid }),
+        db.doc(`groups/reminder-group/members/debtor-${i}`).set({ reclamadoPor: uid }),
+        db.doc(`groups/reminder-group/gastos/expense/divisiones/debt-${i}`).set({
+          groupId: 'reminder-group', memberId: `debtor-${i}`, pagadoPor: 'payer',
+          pagado: false, cantidadCentimos: 100,
+        }),
+      ]);
+    }
+  }
+
+  test('reminders enforce daily and run budgets and resume the durable cursor on the next day', async () => {
+    await seedReminderDivisions(4);
+    const sent = [];
+    const input = {
+      db, messaging: { send: async ({ token }) => sent.push(token) },
+      now: new Date('2026-11-04T15:15:00Z'),
+      limits: { ...REMINDER_LIMITS, divisionsPerRun: 2, divisionsPerDay: 6, sendsPerRun: 2, sendsPerDay: 3 },
+    };
+    assert.equal((await runDebtReminders(input)).sends, 2);
+    assert.equal((await db.doc('backgroundJobs/debtReminders').get()).get('cursor'),
+      'groups/reminder-group/gastos/expense/divisiones/debt-1');
+    assert.equal((await runDebtReminders(input)).sends, 1);
+    assert.deepEqual(sent, ['user-0', 'user-1', 'user-2']);
+    assert.equal((await runDebtReminders(input)).status, 'idle');
+    assert.equal((await db.doc('backgroundJobs/debtReminders').get()).get('sendsCharged'), 3);
+    await runDebtReminders({ ...input, now: new Date('2026-11-05T15:15:00Z') });
+    assert.deepEqual(sent, ['user-0', 'user-1', 'user-2', 'user-3']);
+    assert.equal((await runDebtReminders({ ...input, now: new Date('2026-11-05T15:15:00Z') })).status, 'complete');
+    assert.equal((await db.doc('backgroundJobs/debtReminders').get()).get('cursor'), null);
+  });
+
+  test('reminder retries charge failures, retry the pending division and eventually advance', async () => {
+    await seedReminderDivisions(2);
+    const attempted = [];
+    const input = {
+      db, now: new Date('2026-11-04T15:15:00Z'),
+      limits: { ...REMINDER_LIMITS, divisionsPerRun: 2, attemptsPerDivision: 2 },
+      messaging: { send: async ({ token }) => {
+        attempted.push(token);
+        if (token === 'user-0') throw new Error('FCM temporarily unavailable');
+      } },
+    };
+    await runDebtReminders(input);
+    let state = await db.doc('backgroundJobs/debtReminders').get();
+    assert.equal(state.get('cursor'), null);
+    assert.equal(state.get('sendsCharged'), 1);
+    assert.equal(state.get('leaseUntil'), 0);
+    await runDebtReminders(input);
+    await runDebtReminders(input);
+    state = await db.doc('backgroundJobs/debtReminders').get();
+    assert.deepEqual(attempted, ['user-0', 'user-0', 'user-1']);
+    assert.equal(state.get('sendsCharged'), 3);
+    assert.equal(state.get('cursor'), 'groups/reminder-group/gastos/expense/divisiones/debt-1');
+  });
+
+  test('reminder lease blocks overlap and can be recovered after an invocation dies', async () => {
+    await seedReminderDivisions(1);
+    const stateRef = db.doc('backgroundJobs/debtReminders');
+    const now = new Date('2026-11-04T15:15:00Z');
+    await stateRef.set({ period: '2026-11-04', leaseUntil: Date.now() + 150_000, reservation: 'other-worker' });
+    const sent = [];
+    const input = { db, now, messaging: { send: async ({ token }) => sent.push(token) } };
+    assert.equal((await runDebtReminders(input)).status, 'idle');
+    assert.equal((await stateRef.get()).get('reservation'), 'other-worker');
+    // A complete checkpoint from a crashed invocation can be resumed after its lease expires.
+    await stateRef.set({
+      period: '2026-11-04', cursor: null, divisionsCharged: 50, sendsCharged: 0,
+      attempts: 1, attemptPath: 'groups/reminder-group/gastos/expense/divisiones/debt-0',
+      leaseUntil: Date.now() - 1, reservation: 'dead-worker', done: false,
+    });
+    await runDebtReminders(input);
+    assert.deepEqual(sent, ['user-0']);
+    assert.equal((await stateRef.get()).get('divisionsCharged'), 100);
+    assert.equal((await stateRef.get()).get('leaseUntil'), 0);
+  });
+
+  test('reminders checkpoint partial device delivery when the run send budget is exhausted', async () => {
+    await seedReminderDivisions(1);
+    await Promise.all([
+      db.doc('usuarios/user-0/devices/tablet').set({ fcmToken: 'tablet' }),
+      db.doc('usuarios/user-0/devices/watch').set({ fcmToken: 'watch' }),
+    ]);
+    const sent = [];
+    const input = {
+      db, now: new Date('2026-11-04T15:15:00Z'),
+      limits: { ...REMINDER_LIMITS, sendsPerRun: 1 },
+      messaging: { send: async ({ token }) => sent.push(token) },
+    };
+    await runDebtReminders(input);
+    assert.equal(sent.length, 1);
+    assert.equal((await db.doc('backgroundJobs/debtReminders').get()).get('cursor'), null);
+    await runDebtReminders(input);
+    assert.equal(sent.length, 2);
+    await runDebtReminders(input);
+    assert.deepEqual(sent, ['user-0', 'tablet', 'watch']);
+    const state = await db.doc('backgroundJobs/debtReminders').get();
+    assert.equal(state.get('sendsCharged'), 3);
+    assert.equal(state.get('cursor'), 'groups/reminder-group/gastos/expense/divisiones/debt-0');
+  });
+
+  test('reminder read slots are reserved before querying and cannot exceed the daily ceiling', async () => {
+    await seedReminderDivisions(3);
+    const input = {
+      db, now: new Date('2026-11-04T15:15:00Z'),
+      limits: { ...REMINDER_LIMITS, divisionsPerRun: 2, divisionsPerDay: 2 },
+      messaging: { send: async () => {} },
+    };
+    await runDebtReminders(input);
+    assert.equal((await runDebtReminders(input)).status, 'daily-budget');
+    const state = await db.doc('backgroundJobs/debtReminders').get();
+    assert.equal(state.get('divisionsCharged'), 2);
+    assert.equal(state.get('cursor'), 'groups/reminder-group/gastos/expense/divisiones/debt-1');
+    assert.equal(state.get('done'), true);
+  });
+
+  test('reminders do no database work before the Madrid daily window', async () => {
+    assert.equal((await runDebtReminders({
+      db: {}, messaging: {}, now: new Date('2026-11-04T14:14:59Z'),
+    })).status, 'outside-window');
+  });
+
+  test('expired, future and malformed payment events finish without sending notifications', async () => {
+    for (const timestamp of [new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(),
+      new Date(Date.now() + 60_000).toISOString(), 'malformed', undefined]) {
+      let read = false;
+      await entryPoints.onDeudaPagada.run({ before: { data: () => { read = true; } } }, {
+        eventId: 'discarded-event', timestamp,
+        params: { groupId: 'group', gastoId: 'expense', divisionId: 'division' },
+      });
+      assert.equal(read, false);
+    }
+    assert.equal((await db.collection('eventNotificationDeliveries').get()).empty, true);
   });
 
   test('device reminders retry only failed devices and remove invalid tokens', async () => {

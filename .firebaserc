@@ -1,5 +1,6 @@
 {
   "projects": {
-    "default": "payb2-5e89e"
+    "default": "demo-payb2",
+    "production": "payb2-5e89e"
   }
 }

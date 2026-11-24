@@ -2,16 +2,17 @@
   "name": "functions",
   "description": "Cloud Functions for Firebase",
   "scripts": {
-    "serve": "firebase emulators:start --only functions",
-    "shell": "firebase functions:shell",
-    "start": "npm run shell",
+    "serve": "cd .. && npx --yes firebase-tools@15.34.1 --project demo-payb2 emulators:start --only auth,firestore,functions",
+    "start": "npm run serve",
     "deploy": "firebase deploy --only functions",
+    "check:deploy": "node --check index.js && npm test && npm audit --omit=dev",
     "logs": "firebase functions:log",
-    "test": "node --test test/debt-notifications.test.js test/scheduled-occurrences.test.js test/device-notifications.test.js",
-    "test:rules": "cd .. && npx --yes firebase-tools@13.35.1 --project demo-payb2-rules emulators:exec --only firestore \"npm --prefix functions run test:rules:run\"",
+    "test": "node --test test/debt-notifications.test.js test/scheduled-occurrences.test.js test/device-notifications.test.js test/usage-limits.test.js test/notification-event-policy.test.js",
+    "test:rules": "cd .. && npx --yes firebase-tools@15.34.1 --project demo-payb2-rules emulators:exec --only firestore \"npm --prefix functions run test:rules:run\"",
     "test:rules:run": "node --test test/firestore-rules.test.js",
-    "test:integration": "cd .. && npx --yes firebase-tools@13.35.1 --project demo-payb2-functions emulators:exec --only firestore \"npm --prefix functions run test:integration:run\"",
-    "test:integration:run": "node --test test/functions-entry-points.test.js"
+    "test:demo": "cd .. && npx --yes firebase-tools@15.34.1 --project demo-payb2 emulators:exec --only auth,firestore,functions \"env PAYB2_DEMO_SMOKE=true node --test functions/test/local-emulators.test.js\"",
+    "test:integration": "cd .. && npx --yes firebase-tools@15.34.1 --project demo-payb2-functions emulators:exec --only firestore \"npm --prefix functions run test:integration:run\"",
+    "test:integration:run": "node --test test/functions-entry-points.test.js test/device-registration.test.js test/account-merge-security.test.js test/dependency-compatibility.test.js"
   },
   "engines": {
     "node": "22"
@@ -23,6 +24,14 @@
     "luxon": "^3.7.2"
   },
   "private": true,
+  "overrides": {
+    "@firebase/firestore@4.17.2": {
+      "@grpc/grpc-js": "1.14.7"
+    },
+    "@google-cloud/firestore@9.4.0": {
+      "@google-cloud/firestore-api": "0.7.1"
+    }
+  },
   "devDependencies": {
     "@firebase/rules-unit-testing": "^5.0.2",
     "firebase": "^12.0.0"

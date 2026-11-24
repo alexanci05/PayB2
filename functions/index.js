@@ -20,6 +20,20 @@ const {
 } = require('./lib/scheduled-occurrences');
 const { debtNotificationForTransition } = require('./lib/debt-notifications');
 const { sendNotificationToUser } = require('./lib/device-notifications');
+const { registerMessagingDevice } = require('./lib/device-registration');
+const { registerDebtPayment } = require('./lib/debt-payments');
+const { runDebtReminders } = require('./lib/debt-reminders');
+const { notificationEventRejection } = require('./lib/notification-event-policy');
+const { claimScheduledGroup } = require('./lib/scheduled-groups');
+const { secureCallable } = require('./lib/secure-callable');
+const { reserveProjectCapacity } = require('./lib/usage-limits');
+const {
+  BACKGROUND_OPTIONS,
+  MAX_OCCURRENCES_PER_RUN,
+  MAX_OCCURRENCES_PER_DAY,
+  MAX_OCCURRENCES_PER_GROUP_PER_DAY,
+  MAX_SCHEDULED_GROUPS_PER_RUN,
+} = require('./lib/security-policy');
 const { isGroupAdmin } = require('./lib/group-permissions');
 const {
   AccountMergeConflictError,
@@ -28,18 +42,6 @@ const {
   completeAccountMerge,
   prepareAccountMerge,
 } = require('./lib/account-merge');
-const MAX_OCCURRENCES_PER_SCHEDULE_RUN = 100;
-
-function reminderPeriod(date = new Date()) {
-  const parts = new Intl.DateTimeFormat('en-GB', {
-    timeZone: 'Europe/Madrid',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).formatToParts(date);
-  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-  return `${values.year}-${values.month}-${values.day}`;
-}
 
 async function assertAccountCanMutate(transaction, uid) {
   const merge = await transaction.get(db.collection('accountMerges').doc(uid));
@@ -51,7 +53,7 @@ async function assertAccountCanMutate(transaction, uid) {
   }
 }
 
-exports.prepararFusionCuenta = functions.https.onCall(async (_data, context) => {
+exports.prepararFusionCuenta = secureCallable(db, 'prepararFusionCuenta', async (_data, context) => {
   if (!context.auth) {
     throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesión');
   }
@@ -65,6 +67,7 @@ exports.prepararFusionCuenta = functions.https.onCall(async (_data, context) => 
   try {
     return { mergeTicket: await prepareAccountMerge(db, context.auth.uid) };
   } catch (error) {
+    if (error instanceof functions.https.HttpsError) throw error;
     if (error instanceof AccountMergeConflictError) {
       throw new functions.https.HttpsError('failed-precondition', error.message);
     }
@@ -72,9 +75,9 @@ exports.prepararFusionCuenta = functions.https.onCall(async (_data, context) => 
   }
 });
 
-exports.cancelarFusionCuenta = functions.https.onCall(async (data, context) => {
-  if (!context.auth || context.auth.token.firebase?.sign_in_provider !== 'anonymous') {
-    throw new functions.https.HttpsError('unauthenticated', 'La sesión anónima no está activa');
+exports.cancelarFusionCuenta = secureCallable(db, 'cancelarFusionCuenta', async (data, context) => {
+  if (!context.auth) {
+    throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesión');
   }
   const mergeTicket = data?.mergeTicket;
   if (typeof mergeTicket !== 'string' || mergeTicket.length < 40) {
@@ -91,7 +94,7 @@ exports.cancelarFusionCuenta = functions.https.onCall(async (data, context) => {
   }
 });
 
-exports.bloquearFusionCuenta = functions.https.onCall(async (data, context) => {
+exports.bloquearFusionCuenta = secureCallable(db, 'bloquearFusionCuenta', async (data, context) => {
   if (!context.auth || context.auth.token.firebase?.sign_in_provider !== 'anonymous') {
     throw new functions.https.HttpsError('unauthenticated', 'La sesión anónima no está activa');
   }
@@ -110,7 +113,7 @@ exports.bloquearFusionCuenta = functions.https.onCall(async (data, context) => {
   }
 });
 
-exports.fusionarCuentaAnonima = functions.https.onCall(async (data, context) => {
+exports.fusionarCuentaAnonima = secureCallable(db, 'fusionarCuentaAnonima', async (data, context) => {
   if (!context.auth) {
     throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesión');
   }
@@ -127,13 +130,20 @@ exports.fusionarCuentaAnonima = functions.https.onCall(async (data, context) => 
   } catch (error) {
     console.error('No se pudo fusionar la cuenta anónima', { targetUid: context.auth.uid, error });
     if (error instanceof AccountMergeConflictError) {
-      throw new functions.https.HttpsError('failed-precondition', error.message);
+      throw new functions.https.HttpsError('failed-precondition', error.message,
+        error.reason ? { reason: error.reason } : undefined);
     }
     throw new functions.https.HttpsError('internal', 'No se pudieron conservar los datos de la sesión');
   }
 });
 
-exports.crearGrupo = functions.https.onCall(async (data, context) => {
+exports.registrarDispositivo = secureCallable(db, 'registrarDispositivo', (data, context) =>
+  registerMessagingDevice(db, context.auth.uid, data || {}));
+
+exports.registrarPagoDeuda = secureCallable(db, 'registrarPagoDeuda', (data, context) =>
+  registerDebtPayment(db, context.auth.uid, data || {}));
+
+exports.crearGrupo = secureCallable(db, 'crearGrupo', async (data, context) => {
   if (!context.auth) {
     throw new functions.https.HttpsError("unauthenticated", "Debes iniciar sesión");
   }
@@ -183,6 +193,7 @@ exports.crearGrupo = functions.https.onCall(async (data, context) => {
       const codeRef = db.collection("groupCodes").doc(groupCode);
       const codeSnapshot = await transaction.get(codeRef);
       if (codeSnapshot.exists) return null;
+      await reserveProjectCapacity(transaction, db, 'crearGrupo');
 
       transaction.create(requestRef, {
         groupId: groupRef.id, groupCode, fingerprint,
@@ -228,7 +239,7 @@ function createGroupCode() {
   return Array.from({ length: 8 }, () => chars[randomInt(chars.length)]).join("");
 }
 
-exports.configurarAdministracionGrupo = functions.https.onCall(async (data, context) => {
+exports.configurarAdministracionGrupo = secureCallable(db, 'configurarAdministracionGrupo', async (data, context) => {
   if (!context.auth) {
     throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesion');
   }
@@ -251,7 +262,30 @@ exports.configurarAdministracionGrupo = functions.https.onCall(async (data, cont
   });
 });
 
-exports.agregarMiembroGrupo = functions.https.onCall(async (data, context) => {
+exports.renombrarGrupo = secureCallable(db, 'renombrarGrupo', async (data, context) => {
+  const { groupId } = data || {};
+  const nombre = typeof data?.nombre === 'string' ? data.nombre.trim() : '';
+  if (typeof groupId !== 'string' || !groupId || groupId.length > 1500 || groupId.includes('/') ||
+      !nombre || nombre.length > 80) {
+    throw new functions.https.HttpsError('invalid-argument', 'El nombre o grupo no es válido');
+  }
+  const uid = context.auth.uid;
+  const groupRef = db.collection('groups').doc(groupId);
+  const membershipRef = db.collection('groupMembers').doc(`${groupId}_${uid}`);
+  return db.runTransaction(async (transaction) => {
+    await assertAccountCanMutate(transaction, uid);
+    const [group, membership] = await transaction.getAll(groupRef, membershipRef);
+    const isMember = membership.exists && membership.get('groupId') === groupId &&
+      membership.get('deviceId') === uid;
+    if (!isGroupAdmin(group.data(), uid, isMember)) {
+      throw new functions.https.HttpsError('permission-denied', 'No puedes renombrar este grupo');
+    }
+    transaction.update(groupRef, { name: nombre });
+    return { renamed: true };
+  });
+});
+
+exports.agregarMiembroGrupo = secureCallable(db, 'agregarMiembroGrupo', async (data, context) => {
   if (!context.auth) {
     throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesion');
   }
@@ -298,7 +332,7 @@ exports.agregarMiembroGrupo = functions.https.onCall(async (data, context) => {
   });
 });
 
-exports.reclamarMiembro = functions.https.onCall(async (data, context) => {
+exports.reclamarMiembro = secureCallable(db, 'reclamarMiembro', async (data, context) => {
   if (!context.auth) {
     throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesión');
   }
@@ -342,7 +376,7 @@ exports.reclamarMiembro = functions.https.onCall(async (data, context) => {
   });
 });
 
-exports.crearGasto = functions.https.onCall(async (data, context) => {
+exports.crearGasto = secureCallable(db, 'crearGasto', async (data, context) => {
   if (!context.auth) {
     throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesión');
   }
@@ -355,7 +389,8 @@ exports.crearGasto = functions.https.onCall(async (data, context) => {
   if (!validId(groupId) || !validId(pagadoPor) ||
       typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{20}$/.test(requestId) ||
       typeof nombre !== 'string' ||
-      !nombre.trim() || nombre.trim().length > 100 || typeof descripcion !== 'string' ||
+      !nombre.trim() || nombre.trim().length > 100 ||
+      typeof descripcion !== 'string' || descripcion.length > 2000 ||
       !Number.isSafeInteger(cantidadCentimos) || cantidadCentimos <= 0 ||
       !Array.isArray(participantes) || participantes.length < 1 || participantes.length > 49 ||
       participantes.some((id) => !validId(id) || id === pagadoPor) ||
@@ -433,16 +468,22 @@ exports.crearGasto = functions.https.onCall(async (data, context) => {
       createdByUid: uid,
       ...(authorIdentity ? { createdByMemberId: authorIdentity.id } : {}),
     };
+    await reserveProjectCapacity(transaction, db, 'crearGasto', requestTime.toMillis());
 
     if (scheduleRef) {
       const nextDate = isFuture ? fecha : nextScheduledDate(fecha, frecuencia);
+      const nextInstant = Timestamp.fromDate(scheduleInstant(nextDate, timeZone));
+      if (groupSnap.get('schedulesCheckedAt') == null) {
+        transaction.update(groupRef, { schedulesCheckedAt: Timestamp.fromMillis(0) });
+      }
       transaction.create(scheduleRef, {
         nombre: nombre.trim(), descripcion: descripcion.trim(),
         cantidadCentimos, pagadoPor, timeZone,
         participantes: [...participantes].sort(), frecuencia: frecuencia ?? null,
         diaAncla: frecuencia == null ? null : expenseDate.day,
         proximaFecha: nextDate,
-        proximaEjecucion: Timestamp.fromDate(scheduleInstant(nextDate, timeZone)),
+        proximaEjecucion: nextInstant,
+        nextAttemptAt: nextInstant,
         created: FieldValue.serverTimestamp(), ...author,
       });
     }
@@ -474,7 +515,7 @@ exports.crearGasto = functions.https.onCall(async (data, context) => {
   });
 });
 
-exports.eliminarGasto = functions.https.onCall(async (data, context) => {
+exports.eliminarGasto = secureCallable(db, 'eliminarGasto', async (data, context) => {
   if (!context.auth) {
     throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesión');
   }
@@ -517,7 +558,7 @@ exports.eliminarGasto = functions.https.onCall(async (data, context) => {
   });
 });
 
-exports.eliminarGastoProgramado = functions.https.onCall(async (data, context) => {
+exports.eliminarGastoProgramado = secureCallable(db, 'eliminarGastoProgramado', async (data, context) => {
   if (!context.auth) {
     throw new functions.https.HttpsError('unauthenticated', 'Debes iniciar sesión');
   }
@@ -568,7 +609,7 @@ exports.eliminarGastoProgramado = functions.https.onCall(async (data, context) =
   });
 });
 
-exports.unirseAGrupo = functions.https.onCall(async (data, context) => {
+exports.unirseAGrupo = secureCallable(db, 'unirseAGrupo', async (data, context) => {
   if (!context.auth) {
     throw new functions.https.HttpsError("unauthenticated", "Debes iniciar sesión");
   }
@@ -642,10 +683,17 @@ exports.unirseAGrupo = functions.https.onCall(async (data, context) => {
 
 
 exports.onDeudaPagada = functions
-  .runWith({ failurePolicy: true })
+  .runWith({ ...BACKGROUND_OPTIONS, failurePolicy: true })
   .firestore
   .document('groups/{groupId}/gastos/{gastoId}/divisiones/{divisionId}')
   .onUpdate(async (change, context) => {
+    const rejection = notificationEventRejection(context.timestamp);
+    if (rejection) {
+      console.warn('Discarding debt notification event', {
+        eventId: context.eventId, timestamp: context.timestamp, reason: rejection,
+      });
+      return null;
+    }
     try {
       const before = change.before.data();
       const after = change.after.data();
@@ -669,7 +717,7 @@ exports.onDeudaPagada = functions
 );
 
 
-exports.ejecutarGastosPeriodicos = functions.pubsub
+exports.ejecutarGastosPeriodicos = functions.runWith(BACKGROUND_OPTIONS).pubsub
   .schedule("every 5 minutes")
   .retryConfig({
     retryCount: 3,
@@ -684,28 +732,30 @@ exports.ejecutarGastosPeriodicos = functions.pubsub
 
     try {
       const failures = [];
-      const gastosProgramadosSnap = await db.collectionGroup('gastosProgramados')
-        .where('proximaEjecucion', '<=', hoy).get();
-      for (const gastoProgramadoDoc of gastosProgramadosSnap.docs) {
-        const groupId = gastoProgramadoDoc.ref.parent.parent.id;
+      const budget = await db.collection('usageLimits').doc('scheduledOccurrences').get();
+      if (budget.get('day') === hoy.toDate().toISOString().slice(0, 10) &&
+          budget.get('count') >= MAX_OCCURRENCES_PER_DAY) return null;
+      const groups = await db.collection('groups').orderBy('schedulesCheckedAt')
+        .limit(MAX_SCHEDULED_GROUPS_PER_RUN).get();
+      let processed = 0;
+      for (const group of groups.docs) {
+        if (processed >= MAX_OCCURRENCES_PER_RUN) break;
         try {
-          for (let generated = 0; generated < MAX_OCCURRENCES_PER_SCHEDULE_RUN; generated += 1) {
-            const result = await generarOcurrenciaProgramada({
-              db,
-              groupId,
-              scheduleRef: gastoProgramadoDoc.ref,
-              now: hoy,
-            });
-            console.log(`Gasto programado ${gastoProgramadoDoc.id} en grupo ${groupId}: ${result.message}`);
-            if (!result.hasAnotherDueOccurrence) break;
-            if (generated === MAX_OCCURRENCES_PER_SCHEDULE_RUN - 1) {
-              console.warn(`Gasto programado ${gastoProgramadoDoc.id} alcanzó el límite de recuperación`);
-            }
-          }
+          const gastoProgramadoDoc = await claimScheduledGroup(db, group, hoy);
+          if (!gastoProgramadoDoc) continue;
+          const result = await generarOcurrenciaProgramada({
+            db,
+            groupId: group.id,
+            scheduleRef: gastoProgramadoDoc.ref,
+            now: hoy,
+          });
+          processed += 1;
+          console.log(`Gasto programado ${gastoProgramadoDoc.id} en grupo ${group.id}: ${result.message}`);
+          if (result.budgetExhausted) break;
         } catch (error) {
           failures.push(error);
           console.error(
-            `Error al procesar gasto programado ${gastoProgramadoDoc.ref.path}:`,
+            `Error al procesar programaciones del grupo ${group.id}:`,
             error,
           );
         }
@@ -723,7 +773,7 @@ async function generarOcurrenciaProgramada({ db, groupId, scheduleRef, now }) {
   return db.runTransaction(async (transaction) => {
     const scheduleSnap = await transaction.get(scheduleRef);
     if (!scheduleSnap.exists) {
-      return { message: 'ya eliminado', hasAnotherDueOccurrence: false };
+      return { message: 'ya eliminado' };
     }
 
     const schedule = scheduleSnap.data();
@@ -736,7 +786,7 @@ async function generarOcurrenciaProgramada({ db, groupId, scheduleRef, now }) {
       throw new TypeError('proximaEjecucion debe ser un Timestamp de Firestore');
     }
     if (scheduledAt.toMillis() > now.toMillis()) {
-      return { message: 'ya no vence', hasAnotherDueOccurrence: false };
+      return { message: 'ya no vence' };
     }
 
     const totalCents = centsFromAmount(schedule.cantidadCentimos);
@@ -748,6 +798,23 @@ async function generarOcurrenciaProgramada({ db, groupId, scheduleRef, now }) {
     const nextDate = isOneOff ? null : nextScheduledDate(scheduledDate, schedule.frecuencia, schedule.diaAncla ?? undefined);
 
     if (!occurrenceSnap.exists) {
+      const budgetRef = db.collection('usageLimits').doc('scheduledOccurrences');
+      const groupBudgetRef = db.collection('usageLimits').doc(`scheduledGroup_${groupId}`);
+      const [budget, groupBudget] = await transaction.getAll(budgetRef, groupBudgetRef);
+      const requestedDay = now.toDate().toISOString().slice(0, 10);
+      const globalDay = budget.get('day') > requestedDay ? budget.get('day') : requestedDay;
+      const day = groupBudget.get('day') > globalDay ? groupBudget.get('day') : globalDay;
+      const count = budget.get('day') === day ? budget.get('count') : 0;
+      const groupCount = groupBudget.get('day') === day ? groupBudget.get('count') : 0;
+      if (count >= MAX_OCCURRENCES_PER_DAY) {
+        return { message: 'límite diario de recuperación alcanzado', budgetExhausted: true };
+      }
+      if (groupCount >= MAX_OCCURRENCES_PER_GROUP_PER_DAY) {
+        return { message: 'límite diario de recuperación del grupo alcanzado' };
+      }
+      // The occurrence and its daily allowance commit together, including retries.
+      transaction.set(budgetRef, { day, count: count + 1 });
+      transaction.set(groupBudgetRef, { day, count: groupCount + 1 });
       transaction.create(occurrenceRef, {
         nombre: schedule.nombre,
         descripcion: schedule.descripcion || "",
@@ -780,100 +847,25 @@ async function generarOcurrenciaProgramada({ db, groupId, scheduleRef, now }) {
       transaction.delete(scheduleRef);
       return {
         message: occurrenceSnap.exists ? 'ocurrencia existente y programación eliminada' : 'ocurrencia creada y programación eliminada',
-        hasAnotherDueOccurrence: false,
       };
     }
 
     const nextInstant = Timestamp.fromDate(scheduleInstant(nextDate, timeZone));
-    transaction.update(scheduleRef, { proximaFecha: nextDate, proximaEjecucion: nextInstant });
+    transaction.update(scheduleRef, {
+      proximaFecha: nextDate,
+      proximaEjecucion: nextInstant,
+      nextAttemptAt: nextInstant.toMillis() > now.toMillis() ? nextInstant : now,
+    });
     return {
       message: occurrenceSnap.exists ? 'ocurrencia existente y próxima fecha avanzada' : 'ocurrencia creada',
-      hasAnotherDueOccurrence: nextInstant.toMillis() <= now.toMillis(),
     };
   });
 }
 
-exports.recordatorioDeudas = functions.pubsub
-  .schedule("every day 15:15")
-  .retryConfig({
-    retryCount: 2,
-    minBackoffDuration: "60s",
-    maxBackoffDuration: "5m",
-    maxDoublings: 2,
-  })
-  .timeZone("Europe/Madrid")
-  .onRun(async (context) => {
-    try {
-      console.log("Inicio de recordatorioDeudas");
-      const deliveryFailures = [];
-
-      const membershipsSnap = await db.collection('groupMembers').get();
-      const period = reminderPeriod();
-
-      const accountUidsByGroup = new Map();
-      for (const membership of membershipsSnap.docs) {
-        const groupId = membership.get('groupId');
-        const uid = membership.get('deviceId');
-        if (typeof groupId !== 'string' || typeof uid !== 'string') continue;
-        const groupUids = accountUidsByGroup.get(groupId) ?? new Set();
-        groupUids.add(uid);
-        accountUidsByGroup.set(groupId, groupUids);
-      }
-
-      const debtorUids = new Set();
-      for (const [groupId, groupUids] of accountUidsByGroup) {
-        const [members, pendingDivisions] = await Promise.all([
-          db.collection('groups').doc(groupId).collection('members').get(),
-          db.collectionGroup('divisiones')
-            .where('groupId', '==', groupId)
-            .where('pagado', '==', false)
-            .get(),
-        ]);
-        const uidByMemberId = new Map(
-          members.docs.map((member) => [member.id, member.get('reclamadoPor')]),
-        );
-
-        for (const division of pendingDivisions.docs) {
-          const memberId = division.get('memberId');
-          const payerId = division.get('pagadoPor');
-          const cents = division.get('cantidadCentimos');
-          const hasPositiveAmount = Number.isSafeInteger(cents) && cents > 0;
-          const debtorUid = uidByMemberId.get(memberId);
-          if (hasPositiveAmount && memberId !== payerId && groupUids.has(debtorUid)) {
-            debtorUids.add(debtorUid);
-          }
-        }
-      }
-
-      for (const uid of debtorUids) {
-        try {
-          await sendNotificationToUser({
-            db, messaging, uid, period,
-            title: 'Recordatorio de deudas',
-            body: 'Tienes deudas pendientes en la app.',
-          });
-        } catch (error) {
-          console.error(`No se pudo notificar a ${uid}:`, error);
-          deliveryFailures.push(error);
-        }
-      }
-
-      console.log("Fin de recordatorioDeudas");
-
-      if (deliveryFailures.length > 0) {
-        throw new Error(
-          `Fallaron ${deliveryFailures.length} envíos de recordatorios`,
-          { cause: deliveryFailures[0] },
-        );
-      }
-
-      return null;
-    } catch (error) {
-      console.error("Error en recordatorioDeudas:", error);
-      throw error;
-    }
-  }
-);
+exports.recordatorioDeudas = functions.runWith(BACKGROUND_OPTIONS).pubsub
+  .schedule('every 5 minutes')
+  .timeZone('Europe/Madrid')
+  .onRun(() => runDebtReminders({ db, messaging }));
 
 async function sendNotificationToMember({ groupId, memberId, title, body, eventId }) {
   const memberDoc = await db

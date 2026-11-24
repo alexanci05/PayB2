@@ -35,6 +35,27 @@
   ],
   "fieldOverrides": [
     {
+      "collectionGroup": "eventNotificationDeliveries",
+      "fieldPath": "expiresAt",
+      "ttl": true,
+      "indexes": []
+    },
+    {
+      "collectionGroup": "reminderDeliveries",
+      "fieldPath": "expiresAt",
+      "ttl": true,
+      "indexes": []
+    },
+    {
+      "collectionGroup": "divisiones",
+      "fieldPath": "pagado",
+      "indexes": [
+        { "order": "ASCENDING", "queryScope": "COLLECTION" },
+        { "order": "DESCENDING", "queryScope": "COLLECTION" },
+        { "order": "ASCENDING", "queryScope": "COLLECTION_GROUP" }
+      ]
+    },
+    {
       "collectionGroup": "gastosProgramados",
       "fieldPath": "proximaEjecucion",
       "indexes": [
