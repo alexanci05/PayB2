@@ -12,8 +12,8 @@
 .swiftpm/
 migrate_working_dir/
 
-# Project-local notes
-/docs/notas.md
+# Local development notes
+/docs/**/*.md
 
 # IntelliJ related
 *.iml
