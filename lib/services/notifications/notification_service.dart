@@ -6,23 +6,32 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../controladores/registrar_usuario.dart';
+import '../firebase/firebase_environment.dart';
 
 class NotificationService {
   NotificationService._({
     Future<void> Function(bool)? setAutoInitEnabled,
     Future<void> Function()? removeRegistration,
+    bool? remoteMessagingAvailable,
   }) : _setAutoInitEnabled =
-           setAutoInitEnabled ?? FirebaseMessaging.instance.setAutoInitEnabled,
+           setAutoInitEnabled ??
+           ((enabled) =>
+               FirebaseMessaging.instance.setAutoInitEnabled(enabled)),
        _removeRegistration =
-           removeRegistration ?? removeCurrentDeviceMessagingToken;
+           removeRegistration ?? removeCurrentDeviceMessagingToken,
+       remoteMessagingAvailable =
+           remoteMessagingAvailable ??
+           !FirebaseEnvironment.current.usesEmulators;
 
   @visibleForTesting
   factory NotificationService.forTesting({
     required Future<void> Function(bool) setAutoInitEnabled,
     required Future<void> Function() removeRegistration,
+    bool remoteMessagingAvailable = true,
   }) => NotificationService._(
     setAutoInitEnabled: setAutoInitEnabled,
     removeRegistration: removeRegistration,
+    remoteMessagingAvailable: remoteMessagingAvailable,
   );
 
   static final NotificationService shared = NotificationService._();
@@ -37,6 +46,7 @@ class NotificationService {
       'notifications.removalAcknowledgedRevision';
 
   final ValueNotifier<bool> _enabled = ValueNotifier<bool>(false);
+  final bool remoteMessagingAvailable;
   final Future<void> Function(bool) _setAutoInitEnabled;
   final Future<void> Function() _removeRegistration;
   final FlutterLocalNotificationsPlugin _localNotifications =
@@ -59,6 +69,7 @@ class NotificationService {
   bool get isEnabled => _enabled.value;
 
   Future<void> initialize() async {
+    if (!remoteMessagingAvailable) return;
     final pendingInitialization = _initialization;
     if (pendingInitialization != null) return pendingInitialization;
 
@@ -106,6 +117,7 @@ class NotificationService {
   }
 
   Future<bool> setEnabled(bool enabled) {
+    if (!remoteMessagingAvailable) return Future.value(false);
     final result = _stateChanges.then((_) => _setEnabled(enabled));
     _stateChanges = result.then<void>((_) {}, onError: (_, _) {});
     return result;
@@ -139,6 +151,7 @@ class NotificationService {
   }
 
   Future<void> refreshStatus() {
+    if (!remoteMessagingAvailable) return Future.value();
     final result = _stateChanges.then((_) => _refreshStatus());
     _stateChanges = result.then<void>((_) {}, onError: (_, _) {});
     return result;
@@ -163,6 +176,7 @@ class NotificationService {
   }
 
   Future<void> reconcileAccountMerge(Future<void> Function() merge) async {
+    if (!remoteMessagingAvailable) return merge();
     final preferences = await SharedPreferences.getInstance();
     // Persist before the request: the server may commit without a client reply.
     await _invalidateRemovalAcknowledgement(preferences);

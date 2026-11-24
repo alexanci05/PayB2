@@ -53,6 +53,7 @@ dependencies:
   # Version 5.1 requires a newer Android Kotlin toolchain.
   flutter_timezone: 5.0.2
   timezone: ^0.10.1
+  firebase_app_check: 0.3.2+7
 
 dev_dependencies:
   flutter_test:

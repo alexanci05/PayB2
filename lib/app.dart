@@ -2,11 +2,11 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:firebase_core/firebase_core.dart';
-import 'package:payb2/firebase_options.dart';
 import 'package:payb2/services/auth/account_auth_service.dart';
+import 'package:payb2/services/firebase/initialize_firebase.dart';
 import 'package:payb2/services/network/connection_status.dart';
 import 'package:payb2/services/notifications/notification_service.dart';
+import 'package:payb2/services/security/app_attestation.dart';
 import 'package:payb2/widgets/connection_banner.dart';
 import 'screens/home/home_screen.dart';
 import 'screens/home/main_screen.dart';
@@ -83,10 +83,9 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
 
   Future<Widget> _getInitialScreen() async {
     _starting = true;
+    _firebaseReady = false;
     try {
-      await Firebase.initializeApp(
-        options: DefaultFirebaseOptions.currentPlatform,
-      );
+      await initializeFirebase();
       _firebaseReady = true;
       await ConnectionStatus.shared.start();
       if (FirebaseAuth.instance.currentUser == null) {
@@ -184,8 +183,10 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
                         child: Column(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            const Text(
-                              'No se pudo iniciar la sesión. Comprueba la conexión e inténtalo de nuevo.',
+                            Text(
+                              snapshot.error is AppAttestationException
+                                  ? 'No se pudo verificar la seguridad de la app. Comprueba la conexión e inténtalo de nuevo.'
+                                  : 'No se pudo iniciar la sesión. Comprueba la conexión e inténtalo de nuevo.',
                               textAlign: TextAlign.center,
                             ),
                             const SizedBox(height: 16),

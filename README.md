@@ -39,17 +39,44 @@ cd payb2
 
 ```bash
 flutter pub get
+npm --prefix functions ci
 ```
 
-3. **Configura Firebase:**
+3. **Arranca Firebase local:**
 
-Asegúrate de haber añadido los archivos google-services.json (Android) y GoogleService-Info.plist (iOS) dentro de las rutas correspondientes en el proyecto.
+Se necesitan Node.js 22 y Java 21. No hace falta una cuenta de Firebase, activar facturación ni añadir credenciales. Desde la raíz, en una terminal:
 
-4. **Ejecuta en modo debug o profile:**
+```bash
+npm --prefix functions start
+```
+
+La suite usa `demo-payb2` y escucha solo en este ordenador. Su interfaz local está en `http://127.0.0.1:4000`.
+
+4. **Ejecuta la aplicación en otra terminal:**
 
 ```bash
 flutter run
 ```
+
+El entorno predeterminado utiliza emuladores de Auth, Firestore y Functions: `10.0.2.2` en el emulador Android y `127.0.0.1` en el simulador iOS. No cambia al proyecto real si los emuladores están apagados. Las notificaciones push no están disponibles en este entorno.
+
+Para un Android físico conectado por USB:
+
+```bash
+adb reverse tcp:9099 tcp:9099
+adb reverse tcp:8080 tcp:8080
+adb reverse tcp:5001 tcp:5001
+flutter run --dart-define=FIREBASE_EMULATOR_HOST=127.0.0.1
+```
+
+En macOS, si la terminal usa Java 17, puede seleccionarse el Java 21 incluido con Android Studio antes de arrancar los emuladores:
+
+```bash
+export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
+export PATH="$JAVA_HOME/bin:$PATH"
+```
+
+Para conectar con Firebase de producción, compila con `--dart-define=FIREBASE_ENV=production` y configura App Check para la aplicación registrada. Para una release Android, usa [`android/key.properties.example`](android/key.properties.example) como plantilla para `android/key.properties` y guarda el almacén de claves y sus contraseñas fuera de Git. Para iOS, usa un perfil de aprovisionamiento que admita App Attest. Comprueba la acreditación en un dispositivo físico antes de distribuir la aplicación.
 
 ---
 

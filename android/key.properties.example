@@ -1,0 +1,7 @@
+# Copy to android/key.properties and fill in locally. Never commit that file.
+# storeFile is an absolute path, or a path relative to android/.
+# Escape backslashes in Windows paths: C:\\private\\payb2-upload.jks
+storeFile=/absolute/private/path/payb2-upload.jks
+storePassword=
+keyAlias=payb2-upload
+keyPassword=

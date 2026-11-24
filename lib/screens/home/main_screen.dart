@@ -3,7 +3,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_speed_dial/flutter_speed_dial.dart'; // Biblioteca para el botón flotante con múltiples opciones
 import 'package:payb2/screens/grupo_detalles/grupo_detalle_screen.dart';
 import 'package:payb2/screens/settings/settings_screen.dart';
-import 'package:payb2/services/auth/identity_mutation_tracker.dart';
+import 'package:payb2/services/debts/debt_payments.dart';
 import 'package:payb2/domain/calendar_date.dart';
 import 'package:payb2/domain/group_balances.dart';
 import 'package:payb2/services/debts/wallet_debts.dart';
@@ -258,19 +258,15 @@ class _WalletScreenState extends State<WalletScreen> {
 
   Future<void> _markDebtPaid(_DebtItem debt) async {
     try {
-      await IdentityMutationTracker.shared.track(
-        () => FirebaseFirestore.instance
+      await DebtPayments().markPaid(
+        FirebaseFirestore.instance
             .collection('groups')
             .doc(debt.groupId)
             .collection('gastos')
             .doc(debt.gastoId)
             .collection('divisiones')
-            .doc(debt.splitDocId)
-            .update({
-              'pagado': true,
-              'pagadoEn': FieldValue.serverTimestamp(),
-              'pagoRegistradoPor': debt.myPhantomId,
-            }),
+            .doc(debt.splitDocId),
+        debt.myPhantomId,
       );
     } catch (error) {
       if (!mounted) return;

@@ -2,10 +2,12 @@ import 'dart:async';
 import 'dart:math';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 import 'package:payb2/services/auth/identity_mutation_tracker.dart';
+import 'package:payb2/services/network/connection_status.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 Future<String>? _installationId;
@@ -44,7 +46,7 @@ Future<String?> registerUserForNotifications() async {
   if (token != null) {
     await IdentityMutationTracker.shared.track(() async {
       final user = FirebaseAuth.instance.currentUser;
-      if (user != null) await _saveMessagingToken(user.uid, token);
+      if (user != null) await _saveMessagingToken(token);
     });
   }
   return token;
@@ -67,7 +69,7 @@ Future<bool> _isMessagingTokenReady() async {
 Future<void> saveMessagingTokenForCurrentUser(String token) async {
   await IdentityMutationTracker.shared.track(() async {
     final user = FirebaseAuth.instance.currentUser;
-    if (user != null) await _saveMessagingToken(user.uid, token);
+    if (user != null) await _saveMessagingToken(token);
   });
 }
 
@@ -89,11 +91,9 @@ Future<void> removeCurrentDeviceMessagingToken() async {
   });
 }
 
-Future<void> _saveMessagingToken(String uid, String token) async {
-  final userDoc = FirebaseFirestore.instance.collection('usuarios').doc(uid);
+Future<void> _saveMessagingToken(String token) async {
   final installationId = await _getInstallationId();
-  await userDoc.collection('devices').doc(installationId).set({
-    'fcmToken': token,
-    'tokenUpdatedAt': FieldValue.serverTimestamp(),
-  });
+  await FirebaseFunctions.instance
+      .httpsCallable('registrarDispositivo')
+      .callObserved<void>({'installationId': installationId, 'fcmToken': token});
 }

@@ -189,9 +189,19 @@ class AccountAuthService {
   Future<void> _completeMerge(String ticket) async {
     await (_notifications ?? NotificationService.shared).reconcileAccountMerge(
       () async {
-        await _functions
-            .httpsCallable('fusionarCuentaAnonima')
-            .callObserved<void>({'mergeTicket': ticket});
+        try {
+          await _functions
+              .httpsCallable('fusionarCuentaAnonima')
+              .callObserved<void>({'mergeTicket': ticket});
+        } on FirebaseFunctionsException catch (error) {
+          if (error.code != 'failed-precondition' ||
+              error.details is! Map ||
+              error.details['reason'] != 'same-account') {
+            rethrow;
+          }
+          // Linking can retain the source UID; no data transfer is needed.
+          await _cancelMerge(ticket);
+        }
       },
     );
   }

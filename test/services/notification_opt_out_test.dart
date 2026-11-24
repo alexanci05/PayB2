@@ -11,6 +11,28 @@ import 'package:shared_preferences/shared_preferences.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  test(
+    'demo mode never initializes remote messaging or changes notification preferences',
+    () async {
+      SharedPreferences.setMockInitialValues({'notifications.enabled': true});
+      final service = NotificationService.forTesting(
+        remoteMessagingAvailable: false,
+        setAutoInitEnabled: (_) async => fail('Must not access FCM'),
+        removeRegistration: () async =>
+            fail('Must not register or delete devices'),
+      );
+      await service.initialize();
+      await service.refreshRegistration();
+      expect(await service.setEnabled(true), isFalse);
+      var merged = false;
+      await service.reconcileAccountMerge(() async => merged = true);
+      expect(merged, isTrue);
+      expect(service.isEnabled, isFalse);
+      final preferences = await SharedPreferences.getInstance();
+      expect(preferences.getBool('notifications.enabled'), isTrue);
+    },
+  );
+
   test('opting out works offline and retries an unconfirmed removal', () async {
     SharedPreferences.setMockInitialValues({'notifications.enabled': true});
     final firstRemoval = Completer<void>();
@@ -155,6 +177,55 @@ void main() {
     },
   );
 
+  test(
+    'same-account recovery cancels its ticket and preserves it until cancellation succeeds',
+    () async {
+      const key = 'pendingAccountMergeTicket';
+      SharedPreferences.setMockInitialValues({
+        key: 'same-account-ticket',
+        'notifications.enabled': true,
+      });
+      var failCancellation = true;
+      final calls = <String>[];
+      final service = AccountAuthService(
+        auth: _TargetAuth(),
+        functions: _MergeFunctions(
+          () async {
+            calls.add('merge');
+            throw FirebaseFunctionsException(
+              code: 'failed-precondition',
+              message: 'The source and target account are the same',
+              details: {'reason': 'same-account'},
+            );
+          },
+          cancel: () async {
+            calls.add('cancel');
+            if (failCancellation) {
+              throw FirebaseFunctionsException(
+                code: 'unavailable',
+                message: 'Retry',
+              );
+            }
+          },
+        ),
+        notifications: NotificationService.forTesting(
+          setAutoInitEnabled: (_) async {},
+          removeRegistration: () async {},
+        ),
+      );
+      await expectLater(
+        service.resumePendingMerge(),
+        throwsA(isA<FirebaseFunctionsException>()),
+      );
+      final preferences = await SharedPreferences.getInstance();
+      expect(preferences.getString(key), 'same-account-ticket');
+      failCancellation = false;
+      await service.resumePendingMerge();
+      expect(preferences.getString(key), isNull);
+      expect(calls, ['merge', 'cancel', 'merge', 'cancel']);
+    },
+  );
+
   test('late removal ack cannot consume a merge invalidation', () async {
     SharedPreferences.setMockInitialValues({'notifications.enabled': true});
     final preferences = await SharedPreferences.getInstance();
@@ -211,12 +282,17 @@ class _TargetUser implements User {
 }
 
 class _MergeFunctions implements FirebaseFunctions {
-  _MergeFunctions(this.merge);
+  _MergeFunctions(this.merge, {this.cancel});
 
   final Future<void> Function() merge;
+  final Future<void> Function()? cancel;
 
   @override
   HttpsCallable httpsCallable(String name, {HttpsCallableOptions? options}) {
+    if (name == 'cancelarFusionCuenta') {
+      expect(cancel, isNotNull);
+      return _MergeCallable(cancel!);
+    }
     expect(name, 'fusionarCuentaAnonima');
     return _MergeCallable(merge);
   }

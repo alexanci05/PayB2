@@ -106,7 +106,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
               secondary: const Icon(Icons.notifications_outlined),
               title: const Text('Notificaciones'),
               value: enabled,
-              onChanged: _changingNotifications
+              onChanged:
+                  _changingNotifications ||
+                      !NotificationService.shared.remoteMessagingAvailable
                   ? null
                   : _setNotificationsEnabled,
             );
