@@ -722,7 +722,7 @@ exports.ejecutarGastosPeriodicos = functions.runWith(BACKGROUND_OPTIONS).pubsub
   .retryConfig({
     retryCount: 3,
     minBackoffDuration: "60s",
-    maxBackoffDuration: "10m",
+    maxBackoffDuration: "600s",
     maxDoublings: 3,
   })
   .timeZone("UTC")
