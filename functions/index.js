@@ -635,9 +635,12 @@ exports.unirseAGrupo = secureCallable(db, 'unirseAGrupo', async (data, context) 
       };
     }
 
-    const groupQuery = db.collection("groups").where("groupCode", "==", codigo).limit(1);
-    const groupSnapshot = await transaction.get(groupQuery);
-    if (groupSnapshot.empty) {
+    const invitation = await transaction.get(db.collection("groupCodes").doc(codigo));
+    const groupId = invitation.get("groupId");
+    const group = typeof groupId === "string" && groupId && !groupId.includes("/")
+      ? await transaction.get(db.collection("groups").doc(groupId))
+      : null;
+    if (!group?.exists || group.get("groupCode") !== codigo || !group.get("timeZone")) {
       const windowStartedAt = attempts.windowStartedAt;
       const windowExpired = !windowStartedAt || now.toMillis() - windowStartedAt.toMillis() > 5 * 60 * 1000;
       const failedAttempts = windowExpired ? 1 : (attempts.failedAttempts || 0) + 1;
@@ -654,7 +657,6 @@ exports.unirseAGrupo = secureCallable(db, 'unirseAGrupo', async (data, context) 
       };
     }
 
-    const groupId = groupSnapshot.docs[0].id;
     const membershipRef = db.collection("groupMembers").doc(`${groupId}_${uid}`);
     const membershipSnap = await transaction.get(membershipRef);
     if (!membershipSnap.exists) {

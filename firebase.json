@@ -31,7 +31,24 @@
         ".git",
         "firebase-debug.log",
         "firebase-debug.*.log",
-        "*.local"
+        "test",
+        "scripts",
+        "**/*.local",
+        "**/.env*",
+        "**/.secrets/**",
+        "**/.secret*",
+        "**/.runtimeconfig.json",
+        "**/.npmrc",
+        "**/*service-account*.json",
+        "**/*serviceAccount*.json",
+        "**/*firebase-adminsdk*.json",
+        "**/*.pem",
+        "**/*.key",
+        "**/*.p8",
+        "**/*.p12",
+        "**/*.pfx",
+        "**/*.jks",
+        "**/*.keystore"
       ]
     }
   ],

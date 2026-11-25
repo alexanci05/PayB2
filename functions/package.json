@@ -5,7 +5,7 @@
     "serve": "cd .. && npx --yes firebase-tools@15.34.1 --project demo-payb2 emulators:start --only auth,firestore,functions",
     "start": "npm run serve",
     "deploy": "firebase deploy --only functions",
-    "check:deploy": "node --check index.js && npm test && npm audit --omit=dev",
+    "check:deploy": "node scripts/check-deploy-inputs.js && node --check index.js && npm test && npm audit --omit=dev",
     "logs": "firebase functions:log",
     "test": "node --test test/debt-notifications.test.js test/scheduled-occurrences.test.js test/device-notifications.test.js test/usage-limits.test.js test/notification-event-policy.test.js",
     "test:rules": "cd .. && npx --yes firebase-tools@15.34.1 --project demo-payb2-rules emulators:exec --only firestore \"npm --prefix functions run test:rules:run\"",

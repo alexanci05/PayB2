@@ -401,7 +401,8 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
   });
 
   test('unirseAGrupo creates a membership and remains idempotent', async () => {
-    await db.collection('groups').doc('group-1').set({ groupCode: 'Ab12Cd34' });
+    await db.collection('groups').doc('group-1').set({ groupCode: 'Ab12Cd34', timeZone: 'Europe/Madrid' });
+    await db.collection('groupCodes').doc('Ab12Cd34').set({ groupId: 'group-1' });
 
     const joined = await entryPoints.unirseAGrupo.run(
       { codigo: 'Ab12Cd34' },
@@ -415,6 +416,23 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) {
     assert.deepEqual(joined, { status: 'joined', groupId: 'group-1' });
     assert.deepEqual(repeated, { status: 'already-member', groupId: 'group-1' });
     assert.equal((await db.collection('groupMembers').doc('group-1_member-uid').get()).exists, true);
+  });
+
+  test('unirseAGrupo rejects legacy and inconsistent invitations without creating memberships', async () => {
+    await db.collection('groups').doc('old-group').set({ groupCode: 'Old123Ab' });
+    await db.collection('groupCodes').doc('Old123Ab').set({ groupId: 'old-group' });
+    await db.collection('groups').doc('new-group').set({
+      groupCode: 'New123Ab', timeZone: 'Europe/Madrid',
+    });
+    await db.collection('groupCodes').doc('Stale123').set({ groupId: 'new-group' });
+
+    for (const codigo of ['Old123Ab', 'New123Ab', 'Stale123']) {
+      await assert.rejects(
+        entryPoints.unirseAGrupo.run({ codigo }, { auth: { uid: 'member-uid' } }),
+        { code: codigo === 'Stale123' ? 'resource-exhausted' : 'not-found' },
+      );
+    }
+    assert.equal((await db.collection('groupMembers').get()).empty, true);
   });
 
   test('account merge preserves the union of groups and ownership', async () => {

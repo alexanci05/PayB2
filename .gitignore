@@ -54,10 +54,17 @@ app.*.map.json
 !.env.example
 !.env.*.example
 .secrets/
+.secret.local
 .runtimeconfig.json
+*.jks
+*.keystore
+
+# Local Firebase artifacts and emulator exports
+.firebase/
+firebase-export-*/
 **/*service-account*.json
 **/*serviceAccount*.json
-**/*-firebase-adminsdk-*.json
+**/*firebase-adminsdk*.json
 *.pem
 *.key
 *.p8
