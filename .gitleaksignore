@@ -1,0 +1,13 @@
+# Reviewed historical Firebase client identifiers and CocoaPods spec checksums.
+# Each exception applies only to one finding in one specific commit.
+275aa905cd49c5f9f5688b90c90d26b8aa949671:ios/Podfile.lock:generic-api-key:1530
+275aa905cd49c5f9f5688b90c90d26b8aa949671:ios/Podfile.lock:generic-api-key:1560
+54e43196b2f10d497e8d3681e41db4c641bca645:android/app/google-services.json:gcp-api-key:18
+54e43196b2f10d497e8d3681e41db4c641bca645:lib/firebase_options.dart:gcp-api-key:53
+54e43196b2f10d497e8d3681e41db4c641bca645:lib/firebase_options.dart:gcp-api-key:61
+614eba1a78c612712c8448b67621a971ff932a5c:android/app/google-services.json:gcp-api-key:18
+614eba1a78c612712c8448b67621a971ff932a5c:ios/Podfile.lock:generic-api-key:1501
+614eba1a78c612712c8448b67621a971ff932a5c:ios/Podfile.lock:generic-api-key:1505
+614eba1a78c612712c8448b67621a971ff932a5c:ios/Podfile.lock:generic-api-key:1506
+614eba1a78c612712c8448b67621a971ff932a5c:lib/firebase_options.dart:gcp-api-key:53
+614eba1a78c612712c8448b67621a971ff932a5c:lib/firebase_options.dart:gcp-api-key:61
